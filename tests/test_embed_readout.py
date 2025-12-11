@@ -37,7 +37,10 @@ def test_discrete_autoregressive():
 
     assert logits.shape == (2, 63, 20000)
 
-def test_continuous_autoregressive():
+@param('pred_log_var', (False, True))
+def test_continuous_autoregressive(
+    pred_log_var
+):
 
     tokens = torch.randn(2, 64, 5)
 
@@ -47,7 +50,7 @@ def test_continuous_autoregressive():
 
     attn = Decoder(dim = 512, depth = 1, rotary_pos_emb = True)
 
-    readout = Readout(512, num_continuous = 5)
+    readout = Readout(512, num_continuous = 5, continuous_log_var_embed = pred_log_var)
 
     tokens = embed(past)
 
@@ -57,9 +60,9 @@ def test_continuous_autoregressive():
 
     loss.backward()
 
-    mu_log_var = readout(attended)
+    dist = readout(attended)
 
-    assert mu_log_var.shape == (2, 63, 5, 2)
+    assert dist.shape == (2, 63, 5, 2) if pred_log_var else (2, 63, 5)
 
 def test_discrete_continuous_autoregressive():
 

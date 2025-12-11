@@ -207,7 +207,7 @@ class Readout(Base):
         return_one_discrete_logits = None,
         **kwargs
     ):
-        super().__init__(*args, **kwargs, continuous_log_var_embed = True)
+        super().__init__(*args, **kwargs)
         self.return_one_discrete_logits = default(return_one_discrete_logits, self.num_discrete_groups == 1)
         assert not (self.return_one_discrete_logits and self.num_discrete_groups > 1), 'cannot return only one discrete logit group if greater than one group'
 
@@ -235,8 +235,10 @@ class Readout(Base):
 
         if self.has_continuous:
             continuous_unembed = self.embeddings(self.continuous_mean_log_var_indices)
-            all_continuous_mean_log_var = einsum(embed, continuous_unembed, '... d, nc d -> ... nc')
-            all_continuous_mean_log_var = rearrange(all_continuous_mean_log_var, '... (mu_logvar nc) -> ... nc mu_logvar', mu_logvar = 2)
+            continous_dist_params = einsum(embed, continuous_unembed, '... d, nc d -> ... nc')
+
+            if self.continuous_log_var_embed:
+                continous_dist_params = rearrange(continous_dist_params, '... (mu_logvar nc) -> ... nc mu_logvar', mu_logvar = 2)
 
         # maybe only return distribution parameters
 
@@ -249,9 +251,9 @@ class Readout(Base):
                     return discrete_logits_for_groups
 
                 if self.has_continuous:
-                    return all_continuous_mean_log_var
+                    return continous_dist_params
 
-            return discrete_logits_for_groups, all_continuous_mean_log_var
+            return discrete_logits_for_groups, continous_dist_params
 
         # handle destructing of target
 
@@ -279,14 +281,19 @@ class Readout(Base):
         continuous_losses = self.zero
 
         if self.has_continuous:
-            mean, log_var = all_continuous_mean_log_var.unbind(dim = -1)
-            std = (0.5 * log_var).exp()
 
-            gaussian = Normal(mean, std)
+            if self.continuous_log_var_embed:
+                mean, log_var = continous_dist_params.unbind(dim = -1)
+                std = (0.5 * log_var).exp()
 
-            continuous_losses = -gaussian.log_prob(continuous_targets)
+                gaussian = Normal(mean, std)
+
+                continuous_losses = -gaussian.log_prob(continuous_targets)
+            else:
+                continuous_losses = F.mse_loss(continous_dist_params, continuous_targets, reduction = 'none')
 
             continuous_losses = reduce(continuous_losses, '... nc -> ...', 'sum')
+
             continuous_losses = continuous_losses.mean()
 
         return discrete_losses + continuous_losses
