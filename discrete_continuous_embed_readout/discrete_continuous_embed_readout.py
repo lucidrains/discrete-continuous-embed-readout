@@ -1,5 +1,6 @@
 from __future__ import annotations
 from collections import namedtuple
+from functools import partial
 from beartype import beartype
 
 import torch
@@ -7,6 +8,7 @@ from torch import nn, Tensor, arange, tensor, is_tensor
 import torch.nn.functional as F
 from torch.nested import nested_tensor
 from torch.nn import Module, ModuleList
+from torch.utils._pytree import tree_map
 
 from torch.distributions import Normal
 
@@ -24,6 +26,9 @@ from einops import rearrange, reduce, repeat, einsum
 def exists(v):
     return v is not None
 
+def identity(t):
+    return t
+
 def first(arr):
     return arr[0]
 
@@ -39,10 +44,30 @@ def default(v, d):
 def cast_tuple(t):
     return (t,) if not isinstance(t, tuple) else t
 
+def tree_map_tensor(obj, fn):
+    return tree_map(lambda t: fn(t) if is_tensor(t) else t, obj)
+
 # tensor helpers
 
 def log(t, eps = 1e-20):
     return t.clamp_min(eps).log()
+
+def gumbel_noise(t, eps):
+    return -log(-log(torch.rand_like(t), eps), eps)
+
+def gumbel_sample(t, temperature = 1., eps = 1e-20):
+
+    if temperature <= 0.:
+        return t.argmax(dim = -1)
+
+    noise = gumbel_noise(t, eps)
+    t = t / max(temperature, eps) + noise
+    return t.argmax(dim = -1)
+
+def gaussian_sample(mu_log_var, temperature = 1.):
+    mu, log_var = mu_log_var.unbind(dim = -1)
+    std = (0.5 * log_var).exp()
+    return mu + torch.rand_like(std) * temperature
 
 def exclusive_cumsum(t):
     if not is_tensor(t):
@@ -238,15 +263,59 @@ class Readout(Base):
 
         self.register_buffer('zero', tensor(0.), persistent = False)
 
+    def sample_discrete(
+        self,
+        discrete_logits: Tensor | list[Tensor] | tuple[Tensor, ...],
+        temperature = 1,
+        filter_fn: Callable  = identity,
+        filter_kwargs: dict = dict()
+    ):
+        if isinstance(discrete_logits, (list, tuple)) and len(discrete_logits) == 1:
+            discrete_logits = first(discrete_logits)
+
+        discrete_logits = tree_map_tensor(discrete_logits, partial(filter_fn, **filter_kwargs))
+
+        sampled = tree_map_tensor(discrete_logits, partial(gumbel_sample, temperature = 1.))
+
+        if isinstance(sampled, (list, tuple)):
+            sampled = stack(sampled, dim = -1)
+
+        return sampled
+
+    def sample_continuous(
+        self,
+        continuous_dist_params,
+        temperature = 1.
+    ):
+        assert self.continuous_log_var_embed
+
+        return gaussian_sample(continuous_dist_params, temperature)
+
+    def sample(
+        self,
+        inp
+    ):
+        if self.one_of_discrete_or_continuous:
+            if self.has_discrete:
+                return self.sample_discrete(inp)
+
+            if self.has_continuous:
+                return self.sample_continuous(inp)
+
+        discrete, continuous = inp
+        return self.sample_discrete(discrete), self.sample_continuous(continuous)
+
     def forward(
         self,
         embed,
         targets = None,
-        return_loss = False
+        return_loss = False,
+        sample = False,
+        temperature = 1.
     ):
         assert xnor(exists(targets), return_loss), '`target` must be passed in if `return_loss` set to True and vice versa'
 
-        discrete_logits = None
+        discrete_logits_for_groups = None
 
         # discrete unembedding
 

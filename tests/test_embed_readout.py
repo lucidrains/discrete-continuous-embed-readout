@@ -36,6 +36,9 @@ def test_discrete_autoregressive():
 
     assert logits.shape == (2, 63, 20000)
 
+    sampled = readout.sample(logits)
+    assert sampled.shape == (2, 63)
+
 @param('pred_log_var', (False, True))
 @param('continuous_norm', (False, True))
 def test_continuous_autoregressive(
@@ -77,6 +80,10 @@ def test_continuous_autoregressive(
 
     assert dist.shape == (2, 63, 5, 2) if pred_log_var else (2, 63, 5)
 
+    if pred_log_var:
+        sampled = readout.sample(dist)
+        assert sampled.shape == (2, 63, 5)
+
 def test_discrete_continuous_autoregressive():
 
     continuous_tokens = torch.randn(2, 64, 5)
@@ -103,3 +110,9 @@ def test_discrete_continuous_autoregressive():
 
     assert discrete_logits.shape == (2, 63, 20_000)
     assert continuous_mu_log_var.shape == (2, 63, 5, 2)
+
+    all_logits = readout(attended)
+    sampled_discrete, sampled_continuous = readout.sample(all_logits)
+
+    assert sampled_discrete.shape == (2, 63)
+    assert sampled_continuous.shape == (2, 63, 5)
