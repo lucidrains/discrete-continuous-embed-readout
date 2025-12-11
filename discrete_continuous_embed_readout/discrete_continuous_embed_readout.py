@@ -211,7 +211,7 @@ class Embed(Base):
 
             # reducing across discrete groups
 
-            if sum_continuous:
+            if sum_discrete_groups:
                 discrete_embed = reduce(discrete_embed, '... nd d -> ... d', 'sum')
 
         # take care of continuous

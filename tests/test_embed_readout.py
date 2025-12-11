@@ -141,3 +141,13 @@ def test_multi_discrete_autoregressive():
 
     sampled = readout.sample(logits)
     assert sampled.shape == (2, 63, 2)
+
+def test_multi_discrete_embed():
+
+    token_ids = torch.randint(0, 500, (2, 64, 2))
+
+    embed = Embed(512, num_discrete = (500, 500))
+
+    embedded_groups = embed(token_ids, sum_discrete_groups = False)
+
+    assert embedded_groups.shape == (2, 64, 2, 512)
