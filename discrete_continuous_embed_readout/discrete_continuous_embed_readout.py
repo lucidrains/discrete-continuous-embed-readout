@@ -4,7 +4,7 @@ from functools import partial
 from beartype import beartype
 
 import torch
-from torch import nn, Tensor, arange, tensor, is_tensor
+from torch import nn, Tensor, arange, tensor, is_tensor, stack, cat
 import torch.nn.functional as F
 from torch.nested import nested_tensor
 from torch.nn import Module, ModuleList
@@ -368,6 +368,8 @@ class Readout(Base):
         discrete_losses = self.zero
 
         if self.has_discrete:
+            discrete_targets = rearrange(discrete_targets, '... nd -> nd ...')
+
             discrete_losses = tuple(F.cross_entropy(rearrange(discrete_logit, 'b ... nd -> b nd ...'), one_target) for discrete_logit, one_target in zip(discrete_logits_for_groups, discrete_targets))
 
             discrete_losses = sum(discrete_losses)

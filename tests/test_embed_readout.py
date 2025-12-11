@@ -116,3 +116,28 @@ def test_discrete_continuous_autoregressive():
 
     assert sampled_discrete.shape == (2, 63)
     assert sampled_continuous.shape == (2, 63, 5)
+
+def test_multi_discrete_autoregressive():
+
+    token_ids = torch.randint(0, 500, (2, 64, 2))
+
+    past, future = token_ids[:, :-1], token_ids[:, 1:]
+
+    embed, readout = EmbedAndReadout(512, num_discrete = (500, 500))
+
+    attn = Decoder(dim = 512, depth = 1, rotary_pos_emb = True)
+
+    tokens = embed(past)
+
+    attended = attn(tokens)
+
+    loss = readout(attended, future, return_loss = True)
+
+    loss.backward()
+
+    logits = readout(attended)
+
+    assert all([logit.shape == (2, 63, 500) for logit in logits])
+
+    sampled = readout.sample(logits)
+    assert sampled.shape == (2, 63, 2)
