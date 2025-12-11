@@ -33,6 +33,10 @@ def test_discrete_autoregressive():
 
     loss.backward()
 
+    logits = readout(attended)
+
+    assert logits.shape == (2, 63, 20000)
+
 def test_continuous_autoregressive():
 
     tokens = torch.randn(2, 64, 5)
@@ -52,6 +56,10 @@ def test_continuous_autoregressive():
     loss = readout(attended, future, return_loss = True)
 
     loss.backward()
+
+    mu_log_var = readout(attended)
+
+    assert mu_log_var.shape == (2, 63, 5, 2)
 
 def test_discrete_continuous_autoregressive():
 
