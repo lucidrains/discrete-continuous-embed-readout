@@ -361,16 +361,14 @@ class Readout(Base):
         # take care of only one discrete logit group, as in language modeling
 
         if self.return_one_discrete_logits:
-            discrete_targets = cast_tuple(discrete_targets)
+            discrete_targets = rearrange(discrete_targets, '... -> ... 1')
 
         # handle basic losses
 
         discrete_losses = self.zero
 
         if self.has_discrete:
-            discrete_targets = rearrange(discrete_targets, '... nd -> nd ...')
-
-            discrete_losses = tuple(F.cross_entropy(rearrange(discrete_logit, 'b ... nd -> b nd ...'), one_target) for discrete_logit, one_target in zip(discrete_logits_for_groups, discrete_targets))
+            discrete_losses = tuple(F.cross_entropy(rearrange(discrete_logit, 'b ... nd -> b nd ...'), one_target) for discrete_logit, one_target in zip(discrete_logits_for_groups, discrete_targets.unbind(dim = -1)))
 
             discrete_losses = sum(discrete_losses)
 
