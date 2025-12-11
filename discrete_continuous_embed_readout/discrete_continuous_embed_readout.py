@@ -166,7 +166,8 @@ class Embed(Base):
         sum_discrete_groups = True,
         sum_continuous = True,
         sum_discrete_continuous = True,
-        normalize_continuous = None
+        normalize_continuous = None,
+        explicit_none_outputs = False
     ):
         normalize_continuous = default(normalize_continuous, self.can_norm_continuous)
         assert not (normalize_continuous and not self.can_norm_continuous)
@@ -230,7 +231,7 @@ class Embed(Base):
 
         # convenience
 
-        if self.one_of_discrete_or_continuous:
+        if self.one_of_discrete_or_continuous and not explicit_none_outputs:
             if self.has_discrete:
                 return discrete_embed
 
@@ -315,13 +316,14 @@ class Readout(Base):
         targets = None,
         return_loss = False,
         sample = False,
-        temperature = 1.
+        temperature = 1.,
+        explicit_none_outputs = False
     ):
         assert xnor(exists(targets), return_loss), '`target` must be passed in if `return_loss` set to True and vice versa'
 
-        discrete_logits_for_groups = None
-
         # discrete unembedding
+
+        discrete_logits_for_groups = None
 
         if self.has_discrete:
             discrete_unembed = self.embeddings(self.discrete_indices)
@@ -330,6 +332,8 @@ class Readout(Base):
             discrete_logits_for_groups = all_discrete_logits.split(self.num_discrete, dim = -1)
 
         # continuous unembedding
+
+        continous_dist_params = None
 
         if self.has_continuous:
             continuous_unembed = self.embeddings(self.continuous_mean_log_var_indices)
@@ -344,7 +348,7 @@ class Readout(Base):
             if self.return_one_discrete_logits and exists(discrete_logits_for_groups):
                 discrete_logits_for_groups = first(discrete_logits_for_groups)
 
-            if self.one_of_discrete_or_continuous:
+            if self.one_of_discrete_or_continuous and not explicit_none_outputs:
                 if self.has_discrete:
                     return discrete_logits_for_groups
 
