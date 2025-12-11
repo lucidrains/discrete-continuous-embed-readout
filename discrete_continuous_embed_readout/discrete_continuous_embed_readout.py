@@ -241,12 +241,11 @@ class Readout(Base):
         # maybe only return distribution parameters
 
         if not return_loss:
+            if self.return_one_discrete_logits and exists(discrete_logits_for_groups):
+                discrete_logits_for_groups = first(discrete_logits_for_groups)
+
             if self.one_of_discrete_or_continuous:
-
                 if self.has_discrete:
-                    if self.return_one_discrete_logits:
-                        discrete_logits_for_groups = first(discrete_logits_for_groups)
-
                     return discrete_logits_for_groups
 
                 if self.has_continuous:
