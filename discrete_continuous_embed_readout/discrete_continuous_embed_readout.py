@@ -241,7 +241,11 @@ class Embed(Base):
 
         output = (discrete_embed, continuous_embed)
 
-        if not sum_discrete_continuous:
+        if (
+            not sum_discrete_continuous or
+            not sum_discrete_groups or
+            not sum_continuous
+        ):
             return output
 
         # sum into one token for transformer, often the case, but could be handled separately (say multi-stream transformer or something more elaborate)
