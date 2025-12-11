@@ -10,7 +10,8 @@ from x_transformers import Decoder
 
 from discrete_continuous_embed_readout import (
     Embed,
-    Readout
+    Readout,
+    EmbedAndReadout
 )
 
 def test_discrete_autoregressive():
@@ -19,11 +20,9 @@ def test_discrete_autoregressive():
 
     past, future = token_ids[:, :-1], token_ids[:, 1:]
 
-    embed = Embed(512, num_discrete = 20_000)
+    embed, readout = EmbedAndReadout(512, num_discrete = 20_000)
 
     attn = Decoder(dim = 512, depth = 1, rotary_pos_emb = True)
-
-    readout = Readout(512, num_discrete = 20_000)
 
     tokens = embed(past)
 
@@ -38,19 +37,33 @@ def test_discrete_autoregressive():
     assert logits.shape == (2, 63, 20000)
 
 @param('pred_log_var', (False, True))
+@param('continuous_norm', (False, True))
 def test_continuous_autoregressive(
-    pred_log_var
+    pred_log_var,
+    continuous_norm
 ):
 
     tokens = torch.randn(2, 64, 5)
 
     past, future = tokens[:, :-1], tokens[:, 1:]
 
-    embed = Embed(512, num_continuous = 5)
+    # maybe handle norm
+
+    continuous_mean_std = None
+
+    if continuous_norm:
+        continuous_mean_std = torch.ones((5, 2))
+
+    embed, readout = EmbedAndReadout(
+        512,
+        num_continuous = 5,
+        continuous_mean_std = continuous_mean_std,
+        readout_kwargs = dict(
+            continuous_log_var_embed = pred_log_var,
+        )
+    )
 
     attn = Decoder(dim = 512, depth = 1, rotary_pos_emb = True)
-
-    readout = Readout(512, num_continuous = 5, continuous_log_var_embed = pred_log_var)
 
     tokens = embed(past)
 
@@ -74,11 +87,9 @@ def test_discrete_continuous_autoregressive():
 
     past_continuous, future_continuous = continuous_tokens[:, :-1], continuous_tokens[:, 1:]
 
-    embed = Embed(512, num_discrete = 20_000, num_continuous = 5)
+    embed, readout = EmbedAndReadout(512, num_discrete = 20_000, num_continuous = 5)
 
     attn = Decoder(dim = 512, depth = 1, rotary_pos_emb = True)
-
-    readout = Readout(512, num_discrete = 20_000, num_continuous = 5)
 
     tokens = embed((past_discrete, past_continuous))
 

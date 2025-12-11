@@ -61,7 +61,9 @@ class Base(Module):
         dim,
         num_discrete: int | tuple[int, ...] = 0,
         num_continuous: int = 0,
-        continuous_log_var_embed = True
+        continuous_log_var_embed = True,
+        continuous_mean_std: Tensor | None = None,
+        eps = 1e-6
     ):
         super().__init__()
         num_discrete = cast_tuple(num_discrete) if num_discrete != 0 else ()
@@ -90,6 +92,19 @@ class Base(Module):
 
         self.register_buffer('continuous_indices', arange(num_continuous) + self.continuous_offset, persistent = False)
         self.register_buffer('continuous_mean_log_var_indices', arange(total_continuous) + self.continuous_offset, persistent = False)
+
+        # maybe norm and inverse norm
+
+        self.can_norm_continuous = exists(continuous_mean_std)
+
+        if self.can_norm_continuous:
+            assert self.has_continuous
+            assert continuous_mean_std.shape == (num_continuous, 2)
+            assert (continuous_mean_std[..., -1] > 0).all()
+
+            self.register_buffer('continuous_mean_std', continuous_mean_std)
+
+        self.eps = eps
 
         # discrete related computed values
 
@@ -126,7 +141,11 @@ class Embed(Base):
         sum_discrete_groups = True,
         sum_continuous = True,
         sum_discrete_continuous = True,
+        normalize_continuous = None
     ):
+        normalize_continuous = default(normalize_continuous, self.can_norm_continuous)
+        assert not (normalize_continuous and not self.can_norm_continuous)
+
         # handle inferring it is either discrete or continuous
 
         if is_tensor(inp):
@@ -147,6 +166,12 @@ class Embed(Base):
 
         if self.auto_append_discrete_group_dim and self.has_discrete:
             discrete = rearrange(discrete, '... -> ... 1')
+
+        # maybe norm continuous
+
+        if self.can_norm_continuous and exists(continuous):
+            mean, std = self.continuous_mean_std.unbind(dim = -1)
+            continuous = (continuous - mean) / std.clamp_min(self.eps)
 
         # take care of discrete
 
@@ -297,3 +322,20 @@ class Readout(Base):
             continuous_losses = continuous_losses.mean()
 
         return discrete_losses + continuous_losses
+
+# helper functions for creating both, with optional weight tying
+
+def EmbedAndReadout(
+    *args,
+    weight_tie = False,
+    embed_kwargs: dict = dict(),
+    readout_kwargs: dict = dict(),
+    **kwargs,
+):
+    embed = Embed(*args, **embed_kwargs, **kwargs)
+    readout = Readout(*args, **readout_kwargs, **kwargs)
+
+    if weight_tie:
+        embed.embeddings = readout.embeddings # readout has the superset
+
+    return embed, readout
