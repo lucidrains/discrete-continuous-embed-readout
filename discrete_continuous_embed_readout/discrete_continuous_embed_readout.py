@@ -216,10 +216,10 @@ class Readout(Base):
     def forward(
         self,
         embed,
-        target = None,
+        targets = None,
         return_loss = False
     ):
-        assert xnor(exists(target), return_loss), '`target` must be passed in if `return_loss` set to True and vice versa'
+        assert xnor(exists(targets), return_loss), '`target` must be passed in if `return_loss` set to True and vice versa'
 
         discrete_logits = None
 
@@ -227,7 +227,7 @@ class Readout(Base):
 
         if self.has_discrete:
             discrete_unembed = self.embeddings(self.discrete_indices)
-            all_discrete_logits = einsum(embed, discrete_unembed, '... d, ... nd d -> ... nd')
+            all_discrete_logits = einsum(embed, discrete_unembed, '... d, nd d -> ... nd')
 
             discrete_logits_for_groups = all_discrete_logits.split(self.num_discrete, dim = -1)
 
@@ -235,7 +235,7 @@ class Readout(Base):
 
         if self.has_continuous:
             continuous_unembed = self.embeddings(self.continuous_mean_log_var_indices)
-            all_continuous_mean_log_var = einsum(embed, continuous_unembed, '... d, ... nc d -> ... nc')
+            all_continuous_mean_log_var = einsum(embed, continuous_unembed, '... d, nc d -> ... nc')
             all_continuous_mean_log_var = rearrange(all_continuous_mean_log_var, '... (mu_logvar nc) -> ... nc mu_logvar', mu_logvar = 2)
 
         # maybe only return distribution parameters
@@ -254,17 +254,26 @@ class Readout(Base):
 
             return discrete_logits_for_groups, all_continuous_mean_log_var
 
+        # handle destructing of target
+
+        discrete_targets = targets
+        continuous_targets = targets
+
+        if self.has_discrete and self.has_continuous:
+            assert isinstance(targets, (tuple, list)) and len(targets) == 2
+            discrete_targets, continuous_targets = targets
+
         # take care of only one discrete logit group, as in language modeling
 
         if self.return_one_discrete_logits:
-            target = cast_tuple(target)
+            discrete_targets = cast_tuple(discrete_targets)
 
         # handle basic losses
 
         discrete_losses = self.zero
 
         if self.has_discrete:
-            discrete_losses = tuple(F.cross_entropy(rearrange(discrete_logit, 'b ... nd -> b nd ...'), one_target) for discrete_logit, one_target in zip(discrete_logits_for_groups, target))
+            discrete_losses = tuple(F.cross_entropy(rearrange(discrete_logit, 'b ... nd -> b nd ...'), one_target) for discrete_logit, one_target in zip(discrete_logits_for_groups, discrete_targets))
 
             discrete_losses = sum(discrete_losses)
 
@@ -276,7 +285,7 @@ class Readout(Base):
 
             gaussian = Normal(mean, std)
 
-            continuous_losses = -gaussian.log_prob(target)
+            continuous_losses = -gaussian.log_prob(continuous_targets)
 
             continuous_losses = reduce(continuous_losses, '... nc -> ...', 'sum')
             continuous_losses = continuous_losses.mean()
