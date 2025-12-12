@@ -180,3 +180,22 @@ def test_multi_discrete_embed():
     embedded_groups = embed(token_ids, sum_discrete_groups = False)
 
     assert embedded_groups.shape == (2, 64, 2, 512)
+
+def test_none():
+
+    embed, readout = EmbedAndReadout(512, num_discrete = 20_000, return_only_discrete_or_continuous = False)
+
+    logits, none = readout(torch.randn(2, 63, 512))
+
+    assert none is None
+
+    assert logits.shape == (2, 63, 20000)
+
+    sampled = readout.sample(logits)
+    assert sampled.shape == (2, 63)
+
+    log_prob = readout.log_prob(logits, sampled)
+    assert log_prob.shape == (2, 63)
+
+    entropy = readout.entropy(logits)
+    assert entropy.shape == (2, 63)

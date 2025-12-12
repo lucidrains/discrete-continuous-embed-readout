@@ -6,7 +6,7 @@ from beartype import beartype
 import torch
 from torch import nn, Tensor, arange, tensor, is_tensor, stack, cat
 import torch.nn.functional as F
-from torch.nested import nested_tensor
+from torch.nested import as_nested_tensor
 from torch.nn import Module, ModuleList
 from torch.utils._pytree import tree_map
 
@@ -20,6 +20,10 @@ from einops import rearrange, reduce, repeat, einsum
 # nd - num discrete
 # nc - num continuous
 # f - feature dimension
+
+# constants
+
+DiscreteContinuous = namedtuple('DiscreteContinuous', ('discrete', 'continuous'))
 
 # helpers
 
@@ -94,7 +98,7 @@ def gumbel_sample_multi_categorical(
     assert len(dists) > 0
     one_dist = first(dists)
 
-    nested_dists = nested_tensor(dists, layout = torch.jagged)
+    nested_dists = as_nested_tensor(dists, layout = torch.jagged)
 
     if temperature > 0:
         noise = gumbel_noise(nested_dists, eps)
@@ -119,6 +123,7 @@ class Base(Module):
         continuous_log_var_embed = True,
         continuous_mean_std: Tensor | None = None,
         use_parallel_multi_discrete = True,
+        return_only_discrete_or_continuous = True,
         eps = 1e-6
     ):
         super().__init__()
@@ -178,6 +183,7 @@ class Base(Module):
         # inferring
 
         self.one_of_discrete_or_continuous = self.has_discrete ^ self.has_continuous
+        self.return_only_discrete_or_continuous = return_only_discrete_or_continuous
 
 # embed and readout
 
@@ -200,9 +206,11 @@ class Embed(Base):
         sum_continuous = True,
         sum_discrete_continuous = True,
         normalize_continuous = None,
-        explicit_none_outputs = False
+        return_only_discrete_or_continuous = None
     ):
         normalize_continuous = default(normalize_continuous, self.can_norm_continuous)
+        return_only_discrete_or_continuous = default(return_only_discrete_or_continuous, self.return_only_discrete_or_continuous)
+
         assert not (normalize_continuous and not self.can_norm_continuous)
 
         # handle inferring it is either discrete or continuous
@@ -265,7 +273,7 @@ class Embed(Base):
 
         # convenience
 
-        if self.one_of_discrete_or_continuous and not explicit_none_outputs:
+        if self.one_of_discrete_or_continuous and return_only_discrete_or_continuous:
             if self.has_discrete:
                 return discrete_embed
 
@@ -274,7 +282,7 @@ class Embed(Base):
 
         # handle if both are given
 
-        output = (discrete_embed, continuous_embed)
+        output = DiscreteContinuous(discrete_embed, continuous_embed)
 
         if (
             not sum_discrete_continuous or
@@ -380,7 +388,7 @@ class Readout(Base):
         # handle log softmax
 
         if self.use_parallel_multi_discrete:
-            nested = nested_tensor(discrete_logits, layout = torch.jagged)
+            nested = as_nested_tensor(discrete_logits, layout = torch.jagged)
             log_softmaxed = nested.softmax(dim = -1) * log(nested)
             log_softmaxed = log_softmaxed.unbind()
         else:
@@ -430,7 +438,7 @@ class Readout(Base):
         assert len(discrete_logits) > 0
 
         if self.use_parallel_multi_discrete:
-            nested = nested_tensor(discrete_logits, layout = torch.jagged)
+            nested = as_nested_tensor(discrete_logits, layout = torch.jagged)
             entropies = [*calc_entropy(nested).unbind()]
         else:
             entropies = [calc_entropy(logit) for logit in discrete_logits]
@@ -460,7 +468,7 @@ class Readout(Base):
                 return self.entropy_continuous(dist)
 
         discrete, continuous = dist
-        return self.entropy_discrete(discrete), self.entropy_continuous(continuous)
+        return DiscreteContinuous(self.entropy_discrete(discrete), self.entropy_continuous(continuous))
 
     def forward(
         self,
@@ -468,8 +476,10 @@ class Readout(Base):
         targets = None,
         return_loss = False,
         temperature = 1.,
-        explicit_none_outputs = False
+        return_only_discrete_or_continuous = None
     ):
+        return_only_discrete_or_continuous = default(return_only_discrete_or_continuous, self.return_only_discrete_or_continuous)
+
         assert xnor(exists(targets), return_loss), '`target` must be passed in if `return_loss` set to True and vice versa'
 
         # discrete unembedding
@@ -499,14 +509,14 @@ class Readout(Base):
             if self.return_one_discrete_logits and exists(discrete_logits_for_groups):
                 discrete_logits_for_groups = first(discrete_logits_for_groups)
 
-            if self.one_of_discrete_or_continuous and not explicit_none_outputs:
+            if self.one_of_discrete_or_continuous and return_only_discrete_or_continuous:
                 if self.has_discrete:
                     return discrete_logits_for_groups
 
                 if self.has_continuous:
                     return continuous_dist_params
 
-            return discrete_logits_for_groups, continuous_dist_params
+            return DiscreteContinuous(discrete_logits_for_groups, continuous_dist_params)
 
         # handle destructing of target
 
@@ -527,9 +537,12 @@ class Readout(Base):
         discrete_losses = self.zero
 
         if self.has_discrete:
-            discrete_losses = tuple(F.cross_entropy(rearrange(discrete_logit, 'b ... nd -> b nd ...'), one_target) for discrete_logit, one_target in zip(discrete_logits_for_groups, discrete_targets.unbind(dim = -1)))
-
-            discrete_losses = sum(discrete_losses)
+            if self.use_parallel_multi_discrete:
+                log_probs = self.log_prob_discrete(discrete_logits_for_groups, discrete_targets)
+                discrete_losses = -log_probs.sum(dim = -1).mean()
+            else:
+                discrete_losses = tuple(F.cross_entropy(rearrange(discrete_logit, 'b ... nd -> b nd ...'), one_target) for discrete_logit, one_target in zip(discrete_logits_for_groups, discrete_targets.unbind(dim = -1)))
+                discrete_losses = sum(discrete_losses)
 
         continuous_losses = self.zero
 
