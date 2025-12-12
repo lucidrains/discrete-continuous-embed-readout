@@ -606,6 +606,87 @@ class Readout(Base):
 
         return discrete_losses + continuous_losses
 
+    def kl_div_discrete(
+        self,
+        discrete_logits_true: Tensor | list[Tensor] | tuple[Tensor, ...],
+        discrete_logits_pred: Tensor | list[Tensor] | tuple[Tensor, ...]
+    ):
+        is_list_tuple = isinstance(discrete_logits_true, (list, tuple))
+
+        if not is_list_tuple:
+            discrete_logits_true = (discrete_logits_true,)
+            discrete_logits_pred = (discrete_logits_pred,)
+
+        assert len(discrete_logits_true) > 0
+        assert len(discrete_logits_true) == len(discrete_logits_pred)
+
+        if self.use_parallel_multi_discrete:
+            discrete_logits_true, lens = cat_with_lens(discrete_logits_true)
+            discrete_logits_pred, _ = cat_with_lens(discrete_logits_pred)
+
+            probs_true = segmented_softmax(discrete_logits_true, lens)
+            probs_pred = segmented_softmax(discrete_logits_pred, lens)
+
+            kl = probs_true * (log(probs_true) - log(probs_pred))
+            kl = rearrange(kl, '... l -> l ...')
+
+            kl_divs = torch.segment_reduce(kl, 'sum', lengths = lens)
+            kl_divs = rearrange(kl_divs, 'nd ... -> ... nd')
+        else:
+            kl_divs = []
+
+            for logits_true, logits_pred in zip(discrete_logits_true, discrete_logits_pred):
+                probs_true = logits_true.softmax(dim = -1)
+                log_probs_true = logits_true.log_softmax(dim = -1)
+                log_probs_pred = logits_pred.log_softmax(dim = -1)
+
+                kl = F.kl_div(log_probs_pred, log_probs_true, reduction = 'none', log_target = True)
+                kl_divs.append(kl.sum(dim = -1))
+
+            kl_divs = stack(kl_divs, dim = -1)
+
+        if not is_list_tuple:
+            kl_divs = rearrange(kl_divs, '... 1 -> ...')
+
+        return kl_divs
+
+    def kl_div_continuous(
+        self,
+        continuous_dist_params_true,
+        continuous_dist_params_pred
+    ):
+        assert self.continuous_log_var_embed
+
+        mean_true, log_var_true = continuous_dist_params_true.unbind(dim = -1)
+        std_true = (0.5 * log_var_true).exp()
+        dist_true = Normal(mean_true, std_true)
+
+        mean_pred, log_var_pred = continuous_dist_params_pred.unbind(dim = -1)
+        std_pred = (0.5 * log_var_pred).exp()
+        dist_pred = Normal(mean_pred, std_pred)
+
+        return torch.distributions.kl.kl_divergence(dist_true, dist_pred)
+
+    def kl_div(
+        self,
+        dist_true,
+        dist_pred
+    ):
+        if self.one_of_discrete_or_continuous:
+            if self.has_discrete:
+                return self.kl_div_discrete(dist_true, dist_pred)
+
+            if self.has_continuous:
+                return self.kl_div_continuous(dist_true, dist_pred)
+
+        discrete_true, continuous_true = dist_true
+        discrete_pred, continuous_pred = dist_pred
+
+        return DiscreteContinuous(
+            self.kl_div_discrete(discrete_true, discrete_pred),
+            self.kl_div_continuous(continuous_true, continuous_pred)
+        )
+
 # helper functions for creating both, with optional weight tying
 
 def EmbedAndReadout(

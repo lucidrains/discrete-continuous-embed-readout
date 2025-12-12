@@ -212,3 +212,16 @@ def test_segmented_softmax():
     probs_refs_flat = torch.cat(probs_refs, dim = -1)
 
     assert torch.allclose(probs_flat, probs_refs_flat, atol = 1e-6)
+
+def test_kl_div_parallel_equality():
+    readout = Readout(512, num_discrete = (500, 1000, 500), use_parallel_multi_discrete = True)
+
+    logits_true = [torch.randn(2, 63, 500), torch.randn(2, 63, 1000), torch.randn(2, 63, 500)]
+    logits_pred = [torch.randn(2, 63, 500), torch.randn(2, 63, 1000), torch.randn(2, 63, 500)]
+
+    kl_parallel = readout.kl_div_discrete(logits_true, logits_pred)
+
+    readout.use_parallel_multi_discrete = False
+    kl_sequential = readout.kl_div_discrete(logits_true, logits_pred)
+
+    assert torch.allclose(kl_parallel, kl_sequential, atol = 1e-6)
