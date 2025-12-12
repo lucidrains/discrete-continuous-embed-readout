@@ -164,16 +164,16 @@ class Base(Module):
 
         # discrete related computed values
 
-        self.has_discrete = total_discrete > 0
-        self.num_discrete = num_discrete
-        self.num_discrete_groups = len(num_discrete)
-
         self.use_parallel_multi_discrete = use_parallel_multi_discrete # sampling, entropy, log prob in parallel for multi-discrete
 
-        discrete_group_offsets = exclusive_cumsum(tensor(num_discrete))
+        self.has_discrete = total_discrete > 0
+        self.num_discrete_groups = len(num_discrete)
 
-        self.register_buffer('discrete_indices', arange(total_discrete), persistent = False)
-        self.register_buffer('discrete_group_offsets', discrete_group_offsets, persistent = False)
+        discrete_group_offsets = exclusive_cumsum(num_discrete)
+
+        self.register_buffer('default_num_discrete', tensor(num_discrete), persistent = False)
+        self.register_buffer('default_discrete_indices', arange(total_discrete), persistent = False)
+        self.register_buffer('default_discrete_group_offsets', discrete_group_offsets, persistent = False)
 
         # inferring
 
@@ -239,7 +239,9 @@ class Embed(Base):
         if exists(discrete):
             if self.num_discrete_groups > 1:
                 assert discrete.shape[-1] == self.num_discrete_groups, f'shape of input must end with {self.num_discrete_groups}, as there are two discrete groups'
-                discrete = discrete + self.discrete_group_offsets
+                discrete = discrete + self.default_discrete_group_offsets
+
+            discrete = self.default_discrete_indices[discrete]
 
             discrete_embed = self.embeddings(discrete)
 
@@ -476,10 +478,10 @@ class Readout(Base):
         discrete_logits_for_groups = None
 
         if self.has_discrete:
-            discrete_unembed = self.embeddings(self.discrete_indices)
+            discrete_unembed = self.embeddings(self.default_discrete_indices)
             all_discrete_logits = einsum(embed, discrete_unembed, '... d, nd d -> ... nd')
 
-            discrete_logits_for_groups = all_discrete_logits.split(self.num_discrete, dim = -1)
+            discrete_logits_for_groups = all_discrete_logits.split(self.default_num_discrete.tolist(), dim = -1)
 
         # continuous unembedding
 
