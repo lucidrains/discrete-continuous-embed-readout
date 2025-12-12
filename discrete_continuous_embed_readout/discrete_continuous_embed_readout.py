@@ -211,13 +211,12 @@ class Embed(Base):
             assert self.one_of_discrete_or_continuous
             dtype = inp.dtype
 
-            if self.has_discrete:
-                assert dtype in (torch.int, torch.long)
+            if dtype in (torch.int, torch.long) and self.has_discrete:
                 inp = (inp, None)
-
-            if self.has_continuous:
-                assert dtype == torch.float
+            elif dtype == torch.float and self.has_continuous:
                 inp = (None, inp)
+            else:
+                raise ValueError('invalid tensor')
 
         # destruct
 
