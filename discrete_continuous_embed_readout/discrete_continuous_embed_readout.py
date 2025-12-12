@@ -333,17 +333,85 @@ class Readout(Base):
 
     def sample(
         self,
-        inp
+        dist
     ):
         if self.one_of_discrete_or_continuous:
             if self.has_discrete:
-                return self.sample_discrete(inp)
+                return self.sample_discrete(dist)
 
             if self.has_continuous:
-                return self.sample_continuous(inp)
+                return self.sample_continuous(dist)
 
-        discrete, continuous = inp
+        discrete, continuous = dist
         return self.sample_discrete(discrete), self.sample_continuous(continuous)
+
+    def log_prob_discrete(
+        self,
+        discrete_logits:  Tensor | list[Tensor] | tuple[Tensor, ...], 
+        sampled,
+    ):
+        is_list_tuple = isinstance(discrete_logits, (list, tuple))
+
+        if not is_list_tuple:
+            need_unsqueeze = sampled.ndim == (discrete_logits.ndim - 1)
+
+            if need_unsqueeze:
+                sampled = rearrange(sampled, '... -> ... 1')
+
+            log_prob = discrete_logits.gather(-1, sampled)
+
+            if need_unsqueeze:
+                log_prob = rearrange(log_prob, '... 1 -> ...')
+
+            return log_prob
+
+        assert len(discrete_logits) > 0
+
+        lens = tensor([d.shape[-1] for d in discrete_logits], device = first(discrete_logits).device)
+        offsets = exclusive_cumsum(lens)
+
+        indices = sampled + offsets
+
+        # handle log softmax
+
+        if self.use_parallel_multi_discrete:
+            nested = nested_tensor(discrete_logits, layout = torch.jagged)
+            log_softmaxed = nested.softmax(dim = -1) * log(nested)
+            log_softmaxed = log_softmaxed.unbind()
+        else:
+            log_softmaxed = [logit.log_softmax(dim = -1) for logit in discrete_logits]
+
+        # gather log probs
+
+        log_probs = cat(log_softmaxed, dim = -1).gather(-1, indices)
+        return log_probs
+
+    def log_prob_continuous(
+        self,
+        continuous_dist_params,
+        sampled
+    ):
+        assert self.continuous_log_var_embed
+
+        mean, log_var = continuous_dist_params.unbind(dim = -1)
+        std = (0.5 * log_var).exp()
+        return Normal(mean, std).log_prob(sampled)
+
+    def log_prob(
+        self,
+        dist,
+        sampled
+    ):
+        if self.one_of_discrete_or_continuous:
+            if self.has_discrete:
+                return self.log_prob_discrete(dist, sampled)
+
+            if self.has_continuous:
+                return self.log_prob_continuous(dist, sampled)
+
+        discrete, continuous = dist
+        discrete_sampled, continuous_sampled = sampled
+        return self.log_prob_discrete(discrete, discrete_sampled), self.log_prob_continuous(continuous, continuous_sampled)
 
     def forward(
         self,
