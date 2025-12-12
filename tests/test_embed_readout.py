@@ -8,10 +8,11 @@ from x_transformers import Decoder
 
 # tests
 
-from discrete_continuous_embed_readout import (
+from discrete_continuous_embed_readout.discrete_continuous_embed_readout import (
     Embed,
     Readout,
-    EmbedAndReadout
+    EmbedAndReadout,
+    segmented_softmax
 )
 
 def test_discrete_autoregressive():
@@ -199,3 +200,15 @@ def test_none():
 
     entropy = readout.entropy(logits)
     assert entropy.shape == (2, 63)
+
+def test_segmented_softmax():
+    dims = (5, 10, 3)
+
+    logits = torch.randn(2, 63, sum(dims))
+
+    probs_flat = segmented_softmax(logits, dims)
+
+    probs_refs = [l.softmax(dim = -1) for l in logits.split(dims, dim = -1)]
+    probs_refs_flat = torch.cat(probs_refs, dim = -1)
+
+    assert torch.allclose(probs_flat, probs_refs_flat, atol = 1e-6)

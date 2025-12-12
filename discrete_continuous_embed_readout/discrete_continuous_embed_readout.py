@@ -1,13 +1,15 @@
 from __future__ import annotations
+from typing import Callable
+from beartype import beartype
+
 from collections import namedtuple
 from functools import partial
-from beartype import beartype
 
 import torch
 from torch import nn, Tensor, arange, tensor, is_tensor, stack, cat
-import torch.nn.functional as F
 from torch.nested import as_nested_tensor
-from torch.nn import Module, ModuleList
+import torch.nn.functional as F
+from torch.nn import Module
 from torch.utils._pytree import tree_map
 
 from torch.distributions import Normal
@@ -69,6 +71,38 @@ def calc_entropy(t, eps = 1e-20):
 
 def max_neg_value(t):
     return -torch.finfo(t.dtype).max
+
+def cat_with_lens(tensors: list[Tensor]):
+    catted_tensors = cat(tensors, dim = -1)
+    lens = tensor([t.shape[-1] for t in tensors], device = catted_tensors.device)
+    return catted_tensors, lens
+
+def segmented_softmax(flat_logits, lengths):
+    if isinstance(lengths, (tuple, list)):
+        lengths = tensor(lengths, device = flat_logits.device)
+
+    flat_logits = rearrange(flat_logits, '... d -> d ...')
+
+    # max for stability
+
+    max_logits = torch.segment_reduce(flat_logits, 'max', lengths = lengths)
+    max_logits = torch.repeat_interleave(max_logits, lengths, dim = 0)
+
+    flat_logits = flat_logits - max_logits.detach()
+
+    # exponentiate
+
+    exp_logits = flat_logits.exp()
+
+    # divisor
+
+    sum_exp = torch.segment_reduce(exp_logits, 'sum', lengths = lengths)
+    sum_exp = torch.repeat_interleave(sum_exp, lengths, dim = 0)
+
+    output = exp_logits / sum_exp
+
+    output = rearrange(output, 'd ... -> ... d')
+    return output
 
 # distribution related
 
@@ -230,7 +264,10 @@ class Embed(Base):
 
         discrete, continuous = inp
 
-        if self.auto_append_discrete_group_dim and self.has_discrete:
+        if (
+            exists(discrete) and
+            self.auto_append_discrete_group_dim
+        ):
             discrete = rearrange(discrete, '... -> ... 1')
 
         # maybe norm continuous
@@ -388,15 +425,15 @@ class Readout(Base):
         # handle log softmax
 
         if self.use_parallel_multi_discrete:
-            nested = as_nested_tensor(discrete_logits, layout = torch.jagged)
-            log_softmaxed = nested.softmax(dim = -1) * log(nested)
-            log_softmaxed = log_softmaxed.unbind()
+            discrete_logits, lens = cat_with_lens(discrete_logits)
+            log_softmaxed = log(segmented_softmax(discrete_logits, lens))
         else:
             log_softmaxed = [logit.log_softmax(dim = -1) for logit in discrete_logits]
+            log_softmaxed = cat(log_softmaxed, dim = -1)
 
         # gather log probs
 
-        log_probs = cat(log_softmaxed, dim = -1).gather(-1, indices)
+        log_probs = log_softmaxed.gather(-1, indices)
         return log_probs
 
     def log_prob_continuous(
@@ -438,8 +475,13 @@ class Readout(Base):
         assert len(discrete_logits) > 0
 
         if self.use_parallel_multi_discrete:
-            nested = as_nested_tensor(discrete_logits, layout = torch.jagged)
-            entropies = [*calc_entropy(nested).unbind()]
+            discrete_logits, lens = cat_with_lens(discrete_logits)
+            probs = segmented_softmax(discrete_logits, lens)
+
+            neg_prob_log_prob = -probs * log(probs)
+            neg_prob_log_prob = rearrange(neg_prob_log_prob, '... l -> l ...')
+
+            entropies = torch.segment_reduce(neg_prob_log_prob, 'sum', lengths = lens)
         else:
             entropies = [calc_entropy(logit) for logit in discrete_logits]
 
