@@ -280,7 +280,7 @@ class Readout(Base):
 
         discrete_logits = tree_map_tensor(discrete_logits, partial(filter_fn, **filter_kwargs))
 
-        sampled = tree_map_tensor(discrete_logits, partial(gumbel_sample, temperature = 1.))
+        sampled = tree_map_tensor(discrete_logits, partial(gumbel_sample, temperature = temperature))
 
         if isinstance(sampled, (list, tuple)):
             sampled = stack(sampled, dim = -1)
@@ -333,14 +333,14 @@ class Readout(Base):
 
         # continuous unembedding
 
-        continous_dist_params = None
+        continuous_dist_params = None
 
         if self.has_continuous:
             continuous_unembed = self.embeddings(self.continuous_mean_log_var_indices)
-            continous_dist_params = einsum(embed, continuous_unembed, '... d, nc d -> ... nc')
+            continuous_dist_params = einsum(embed, continuous_unembed, '... d, nc d -> ... nc')
 
             if self.continuous_log_var_embed:
-                continous_dist_params = rearrange(continous_dist_params, '... (mu_logvar nc) -> ... nc mu_logvar', mu_logvar = 2)
+                continuous_dist_params = rearrange(continuous_dist_params, '... (mu_logvar nc) -> ... nc mu_logvar', mu_logvar = 2)
 
         # maybe only return distribution parameters
 
@@ -353,9 +353,9 @@ class Readout(Base):
                     return discrete_logits_for_groups
 
                 if self.has_continuous:
-                    return continous_dist_params
+                    return continuous_dist_params
 
-            return discrete_logits_for_groups, continous_dist_params
+            return discrete_logits_for_groups, continuous_dist_params
 
         # handle destructing of target
 
@@ -385,14 +385,14 @@ class Readout(Base):
         if self.has_continuous:
 
             if self.continuous_log_var_embed:
-                mean, log_var = continous_dist_params.unbind(dim = -1)
+                mean, log_var = continuous_dist_params.unbind(dim = -1)
                 std = (0.5 * log_var).exp()
 
                 gaussian = Normal(mean, std)
 
                 continuous_losses = -gaussian.log_prob(continuous_targets)
             else:
-                continuous_losses = F.mse_loss(continous_dist_params, continuous_targets, reduction = 'none')
+                continuous_losses = F.mse_loss(continuous_dist_params, continuous_targets, reduction = 'none')
 
             continuous_losses = reduce(continuous_losses, '... nc -> ...', 'sum')
 
