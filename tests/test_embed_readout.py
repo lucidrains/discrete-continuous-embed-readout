@@ -117,13 +117,20 @@ def test_discrete_continuous_autoregressive():
     assert sampled_discrete.shape == (2, 63)
     assert sampled_continuous.shape == (2, 63, 5)
 
-def test_multi_discrete_autoregressive():
+@param('use_parallel_multi_discrete', (False, True))
+def test_multi_discrete_autoregressive(
+    use_parallel_multi_discrete
+):
 
     token_ids = torch.randint(0, 500, (2, 64, 2))
 
     past, future = token_ids[:, :-1], token_ids[:, 1:]
 
-    embed, readout = EmbedAndReadout(512, num_discrete = (500, 500))
+    embed, readout = EmbedAndReadout(
+        512,
+        num_discrete = (500, 500),
+        use_parallel_multi_discrete = use_parallel_multi_discrete
+    )
 
     attn = Decoder(dim = 512, depth = 1, rotary_pos_emb = True)
 
