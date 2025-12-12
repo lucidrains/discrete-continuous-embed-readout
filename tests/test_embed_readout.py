@@ -42,6 +42,9 @@ def test_discrete_autoregressive():
     log_prob = readout.log_prob(logits, sampled)
     assert log_prob.shape == (2, 63)
 
+    entropy = readout.entropy(logits)
+    assert entropy.shape == (2, 63)
+
 @param('pred_log_var', (False, True))
 @param('continuous_norm', (False, True))
 def test_continuous_autoregressive(
@@ -126,6 +129,10 @@ def test_discrete_continuous_autoregressive():
     assert log_prob_discrete.shape == (2, 63)
     assert log_prob_continuous.shape == (2, 63, 5)
 
+    entropy_discrete, entropy_continuous = readout.entropy(all_logits)
+    assert entropy_discrete.shape == (2, 63)
+    assert entropy_continuous.shape == (2, 63, 5)
+
 @param('use_parallel_multi_discrete', (False, True))
 def test_multi_discrete_autoregressive(
     use_parallel_multi_discrete
@@ -160,6 +167,9 @@ def test_multi_discrete_autoregressive(
 
     log_probs = readout.log_prob(logits, sampled)
     assert log_probs.shape == (2, 63, 2)
+
+    entropy = readout.entropy(logits)
+    assert entropy.shape == (2, 63, 2)
 
 def test_multi_discrete_embed():
 

@@ -59,6 +59,10 @@ def exclusive_cumsum(t):
 def log(t, eps = 1e-20):
     return t.clamp_min(eps).log()
 
+def calc_entropy(t, eps = 1e-20):
+    prob = t.softmax(dim = -1)
+    return (-prob * log(prob, eps)).sum(dim = -1)
+
 def max_neg_value(t):
     return -torch.finfo(t.dtype).max
 
@@ -412,6 +416,50 @@ class Readout(Base):
         discrete, continuous = dist
         discrete_sampled, continuous_sampled = sampled
         return self.log_prob_discrete(discrete, discrete_sampled), self.log_prob_continuous(continuous, continuous_sampled)
+
+    def entropy_discrete(
+        self,
+        discrete_logits:  Tensor | list[Tensor] | tuple[Tensor, ...]
+    ):
+        is_list_tuple = isinstance(discrete_logits, (list, tuple))
+
+        if not is_list_tuple:
+            return calc_entropy(discrete_logits)
+
+        assert len(discrete_logits) > 0
+
+        if self.use_parallel_multi_discrete:
+            nested = nested_tensor(discrete_logits, layout = torch.jagged)
+            entropies = [*calc_entropy(nested).unbind()]
+        else:
+            entropies = [calc_entropy(logit) for logit in discrete_logits]
+
+        entropies = rearrange(entropies, 'nd ... -> ... nd')
+        return entropies
+
+    def entropy_continuous(
+        self,
+        continuous_dist_params
+    ):
+        assert self.continuous_log_var_embed
+
+        mean, log_var = continuous_dist_params.unbind(dim = -1)
+        std = (0.5 * log_var).exp()
+        return Normal(mean, std).entropy()
+
+    def entropy(
+        self,
+        dist
+    ):
+        if self.one_of_discrete_or_continuous:
+            if self.has_discrete:
+                return self.entropy_discrete(dist)
+
+            if self.has_continuous:
+                return self.entropy_continuous(dist)
+
+        discrete, continuous = dist
+        return self.entropy_discrete(discrete), self.entropy_continuous(continuous)
 
     def forward(
         self,
