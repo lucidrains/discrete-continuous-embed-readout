@@ -256,6 +256,91 @@ class ContinuousSelector(Module):
 
 # base
 
+class DiscreteContinuousSelector(Module):
+    @beartype
+    def __init__(
+        self,
+        continuous_log_var_embed = True,
+        continuous_mean_std: Module | None = None,
+        embeddings: nn.Embedding | None = None,
+        # discrete specific
+        discrete_set_indices: list[list[int]] | None = None,
+        # continuous specific
+        continuous_indices: list[int] | None = None,
+        num_continuous: int = 0,
+        embedding_offset: int = 0,
+    ):
+        super().__init__()
+
+        # determine if has discrete or continuous
+
+        self.has_discrete = exists(discrete_set_indices)
+        self.has_continuous = exists(continuous_indices)
+
+        assert self.has_discrete or self.has_continuous, 'must have either discrete or continuous'
+
+        # inferring
+
+        self.one_of_discrete_or_continuous = self.has_discrete ^ self.has_continuous
+
+        # discrete
+
+        self.discrete_selector = None
+
+        if self.has_discrete:
+            self.discrete_selector = DiscreteSelector(
+                discrete_set_indices,
+                embeddings
+            )
+
+        # continuous
+
+        self.continuous_selector = None
+
+        if self.has_continuous:
+            self.continuous_selector = ContinuousSelector(
+                continuous_indices,
+                embeddings,
+                num_continuous = num_continuous,
+                embedding_offset = embedding_offset,
+                continuous_mean_std = continuous_mean_std,
+                continuous_log_var_embed = continuous_log_var_embed
+            )
+
+    @property
+    def discrete_indices(self):
+        return self.discrete_selector.discrete_indices
+
+    @property
+    def continuous_mean_std(self):
+        return self.continuous_selector.continuous_mean_std
+
+    @property
+    def continuous_log_var_embed(self):
+        return self.continuous_selector.continuous_log_var_embed
+
+    # methods for inferring whether to return tuple or single value
+
+    def validate_and_return_inputs(
+        self,
+        inp
+    ):
+        if is_tensor(inp):
+            assert self.one_of_discrete_or_continuous
+            dtype = inp.dtype
+
+            if dtype in (torch.int, torch.long) and self.has_discrete:
+                inp = (inp, None)
+            elif dtype == torch.float and self.has_continuous:
+                inp = (None, inp)
+            else:
+                raise ValueError('invalid tensor')
+
+        return inp
+
+
+# base
+
 class Base(Module):
 
     @beartype
@@ -294,7 +379,6 @@ class Base(Module):
 
         # maybe norm and inverse norm
 
-        self.continuous_mean_std = None
         self.can_norm_continuous = exists(continuous_mean_std)
 
         if self.can_norm_continuous:
@@ -302,40 +386,33 @@ class Base(Module):
             assert continuous_mean_std.shape == (num_continuous, 2)
             assert (continuous_mean_std[..., -1] > 0).all()
 
-            self.continuous_mean_std = BufferModule(continuous_mean_std)
+            continuous_mean_std = BufferModule(continuous_mean_std)
 
         # discrete related computed values
 
         self.use_parallel_multi_discrete = use_parallel_multi_discrete # sampling, entropy, log prob in parallel for multi-discrete
 
         counter = count(0)
-        default_discrete_indices = [[next(counter) for _ in range(n)] for n in num_discrete]
-
-        self.discrete_selector = DiscreteSelector(
-            default_discrete_indices,
-            self.embeddings
-        )
+        default_discrete_indices = [[next(counter) for _ in range(n)] for n in num_discrete] if self.has_discrete else None
 
         self.num_discrete_sets = len(num_discrete)
 
         # continuous related
 
-        default_continuous_indices = arange(num_continuous).tolist()
+        default_continuous_indices = arange(num_continuous).tolist() if self.has_continuous else None
 
-        self.continuous_selector = ContinuousSelector(
-            default_continuous_indices,
-            self.embeddings,
+        self.selector = DiscreteContinuousSelector(
+            continuous_log_var_embed = continuous_log_var_embed,
+            continuous_mean_std = continuous_mean_std,
+            embeddings = self.embeddings,
+            discrete_set_indices = default_discrete_indices,
+            continuous_indices = default_continuous_indices,
             num_continuous = num_continuous,
-            embedding_offset = total_discrete,
-            continuous_mean_std = self.continuous_mean_std,
-            continuous_log_var_embed = continuous_log_var_embed
+            embedding_offset = total_discrete
         )
 
-        self.continuous_log_var_embed = continuous_log_var_embed
+        # delegation properties
 
-        # inferring
-
-        self.one_of_discrete_or_continuous = self.has_discrete ^ self.has_continuous
         self.return_only_discrete_or_continuous = return_only_discrete_or_continuous
 
         # epsilon
@@ -372,16 +449,7 @@ class Embed(Base):
 
         # handle inferring it is either discrete or continuous
 
-        if is_tensor(inp):
-            assert self.one_of_discrete_or_continuous
-            dtype = inp.dtype
-
-            if dtype in (torch.int, torch.long) and self.has_discrete:
-                inp = (inp, None)
-            elif dtype == torch.float and self.has_continuous:
-                inp = (None, inp)
-            else:
-                raise ValueError('invalid tensor')
+        inp = self.selector.validate_and_return_inputs(inp)
 
         # destruct
 
@@ -396,7 +464,7 @@ class Embed(Base):
         # maybe norm continuous
 
         if self.can_norm_continuous and exists(continuous):
-            mean, std = self.continuous_mean_std.data.unbind(dim = -1)
+            mean, std = self.selector.continuous_mean_std.data.unbind(dim = -1)
             continuous = (continuous - mean) / std.clamp_min(self.eps)
 
         # take care of discrete
@@ -404,7 +472,7 @@ class Embed(Base):
         discrete_embed = None
 
         if exists(discrete):
-            discrete_embed = self.discrete_selector.embed(discrete)
+            discrete_embed = self.selector.discrete_selector.embed(discrete)
 
             # reducing across discrete groups
 
@@ -416,7 +484,7 @@ class Embed(Base):
         continuous_embed = None
 
         if exists(continuous):
-            continuous_embed = self.continuous_selector.get_embed()
+            continuous_embed = self.selector.continuous_selector.get_embed()
 
             # whether to reduce for continuous
 
@@ -427,7 +495,7 @@ class Embed(Base):
 
         # convenience
 
-        if self.one_of_discrete_or_continuous and return_only_discrete_or_continuous:
+        if self.selector.one_of_discrete_or_continuous and return_only_discrete_or_continuous:
             if self.has_discrete:
                 return discrete_embed
 
@@ -494,14 +562,14 @@ class Readout(Base):
         continuous_dist_params,
         temperature = 1.
     ):
-        assert self.continuous_log_var_embed
+        assert self.selector.continuous_log_var_embed
 
         sampled = gaussian_sample(continuous_dist_params, temperature)
 
         if not self.can_norm_continuous:
             return sampled
 
-        mean, std = self.continuous_mean_std.data.unbind(dim = -1)
+        mean, std = self.selector.continuous_mean_std.data.unbind(dim = -1)
         inverse_normed = sampled * std + mean
         return inverse_normed
 
@@ -509,7 +577,7 @@ class Readout(Base):
         self,
         dist
     ):
-        if self.one_of_discrete_or_continuous:
+        if self.selector.one_of_discrete_or_continuous:
             if self.has_discrete:
                 return self.sample_discrete(dist)
 
@@ -565,7 +633,7 @@ class Readout(Base):
         continuous_dist_params,
         sampled
     ):
-        assert self.continuous_log_var_embed
+        assert self.selector.continuous_log_var_embed
         dist = mean_log_var_to_normal_dist(continuous_dist_params)
         return dist.log_prob(sampled)
 
@@ -574,7 +642,7 @@ class Readout(Base):
         dist,
         sampled
     ):
-        if self.one_of_discrete_or_continuous:
+        if self.selector.one_of_discrete_or_continuous:
             if self.has_discrete:
                 return self.log_prob_discrete(dist, sampled)
 
@@ -614,7 +682,7 @@ class Readout(Base):
         self,
         continuous_dist_params
     ):
-        assert self.continuous_log_var_embed
+        assert self.selector.continuous_log_var_embed
         dist = mean_log_var_to_normal_dist(continuous_dist_params)
         return dist.entropy()
 
@@ -622,7 +690,7 @@ class Readout(Base):
         self,
         dist
     ):
-        if self.one_of_discrete_or_continuous:
+        if self.selector.one_of_discrete_or_continuous:
             if self.has_discrete:
                 return self.entropy_discrete(dist)
 
@@ -649,20 +717,20 @@ class Readout(Base):
         discrete_logits_for_groups = None
 
         if self.has_discrete:
-            discrete_unembed = self.discrete_selector.get_readout_embeds()
+            discrete_unembed = self.selector.discrete_selector.get_readout_embeds()
             all_discrete_logits = einsum(embed, discrete_unembed, '... d, nd d -> ... nd')
 
-            discrete_logits_for_groups = self.discrete_selector.split_packed(all_discrete_logits)
+            discrete_logits_for_groups = self.selector.discrete_selector.split_packed(all_discrete_logits)
 
         # continuous unembedding
 
         continuous_dist_params = None
 
         if self.has_continuous:
-            continuous_unembed = self.continuous_selector.get_mean_logvar_embed()
+            continuous_unembed = self.selector.continuous_selector.get_mean_logvar_embed()
             continuous_dist_params = einsum(embed, continuous_unembed, '... d, nc d -> ... nc')
 
-            if self.continuous_log_var_embed:
+            if self.selector.continuous_log_var_embed:
                 continuous_dist_params = rearrange(continuous_dist_params, '... (mu_logvar nc) -> ... nc mu_logvar', mu_logvar = 2)
 
         # maybe only return distribution parameters
@@ -671,7 +739,7 @@ class Readout(Base):
             if self.return_one_discrete_logits and exists(discrete_logits_for_groups):
                 discrete_logits_for_groups = first(discrete_logits_for_groups)
 
-            if self.one_of_discrete_or_continuous and return_only_discrete_or_continuous:
+            if self.selector.one_of_discrete_or_continuous and return_only_discrete_or_continuous:
                 if self.has_discrete:
                     return discrete_logits_for_groups
 
@@ -710,7 +778,7 @@ class Readout(Base):
 
         if self.has_continuous:
 
-            if self.continuous_log_var_embed:
+            if self.selector.continuous_log_var_embed:
                 gaussian = mean_log_var_to_normal_dist(continuous_dist_params)
 
                 continuous_losses = -gaussian.log_prob(continuous_targets)
@@ -721,7 +789,7 @@ class Readout(Base):
 
             continuous_losses = continuous_losses.mean()
 
-        if self.one_of_discrete_or_continuous:
+        if self.selector.one_of_discrete_or_continuous:
             if self.has_discrete:
                 return discrete_losses
 
@@ -779,7 +847,7 @@ class Readout(Base):
         continuous_dist_params_true,
         continuous_dist_params_pred
     ):
-        assert self.continuous_log_var_embed
+        assert self.selector.continuous_log_var_embed
 
         dist_true = mean_log_var_to_normal_dist(continuous_dist_params_true)
         dist_pred = mean_log_var_to_normal_dist(continuous_dist_params_pred)
@@ -791,7 +859,7 @@ class Readout(Base):
         dist_true,
         dist_pred
     ):
-        if self.one_of_discrete_or_continuous:
+        if self.selector.one_of_discrete_or_continuous:
             if self.has_discrete:
                 return self.kl_div_discrete(dist_true, dist_pred)
 
