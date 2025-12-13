@@ -1,13 +1,13 @@
 from __future__ import annotations
 from typing import Callable
 from beartype import beartype
+from beartype.door import is_bearable
 
 from collections import namedtuple
 from functools import partial
 
 import torch
 from torch import nn, Tensor, arange, tensor, is_tensor, stack, cat
-from torch.nested import as_nested_tensor
 import torch.nn.functional as F
 from torch.nn import Module
 from torch.utils._pytree import tree_map
@@ -22,6 +22,7 @@ from einops import rearrange, reduce, repeat, einsum
 # nd - num discrete
 # nc - num continuous
 # f - feature dimension
+# l - logits
 
 # constants
 
@@ -134,20 +135,25 @@ def gumbel_sample_multi_categorical(
     temperature = 1.,
     eps = 1e-20
 ):
+    is_greedy = temperature <= 0.
     assert len(dists) > 0
     one_dist = first(dists)
 
-    nested_dists = as_nested_tensor(dists, layout = torch.jagged)
+    dists, lens = cat_with_lens(dists)
 
-    if temperature > 0:
-        noise = gumbel_noise(nested_dists, eps)
-        nested_dists = nested_dists / max(temperature, eps) + noise
+    if not is_greedy:
+        noise = gumbel_noise(dists, eps)
+        dists = dists / max(temperature, eps) + noise
+
+    dists = dists.split(lens.tolist(), dim = -1)
+    max_len = max(lens.tolist())
 
     mask_value = max_neg_value(one_dist)
-    padded = nested_dists.to_padded_tensor(mask_value)
-    sampled = padded.argmax(dim = -1)
+    padded = [F.pad(d, (0, max_len - d.shape[-1]), value = mask_value) for d in dists]
 
-    return rearrange(sampled, 'nd ... -> ... nd')
+    sampled = stack(padded, dim = -2).argmax(dim = -1)
+
+    return sampled
 
 # base
 
