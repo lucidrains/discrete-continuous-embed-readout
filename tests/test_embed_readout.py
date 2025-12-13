@@ -347,7 +347,7 @@ def test_multiple_selectors():
 def test_concat_entropy_log_prob():
     # 1. mixed case
 
-    selectors = (
+    selector = (
         # discrete (2 groups)
         [[i for i in range(100)], [i + 100 for i in range(100)]],
         # continuous (5 dims)
@@ -358,7 +358,7 @@ def test_concat_entropy_log_prob():
         dim = 512,
         num_discrete = 300,
         num_continuous = 30,
-        selectors = selectors,
+        selector = selector,
         readout_kwargs = dict(
             continuous_log_var_embed = True
         )

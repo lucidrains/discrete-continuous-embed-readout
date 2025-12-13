@@ -31,6 +31,7 @@ DiscreteContinuous = namedtuple('DiscreteContinuous', ('discrete', 'continuous')
 
 DiscreteConfig = list[list[int]]
 ContinuousConfig = list[int]
+SelectorConfig = tuple[DiscreteConfig, ContinuousConfig] | DiscreteConfig | ContinuousConfig
 
 # helpers
 
@@ -352,7 +353,8 @@ class Base(Module):
         dim,
         num_discrete: int | tuple[int, ...] = 0,
         num_continuous: int = 0,
-        selectors: list[tuple[DiscreteConfig, ContinuousConfig] | DiscreteConfig | ContinuousConfig] | tuple[DiscreteConfig, ContinuousConfig] | DiscreteConfig | ContinuousConfig | None = None,
+        selector: SelectorConfig | None = None,
+        selectors: list[SelectorConfig] | None = None,
         continuous_log_var_embed = True,
         continuous_mean_std: Tensor | None = None,
         use_parallel_multi_discrete = True,
@@ -363,8 +365,10 @@ class Base(Module):
 
         # automatically handle single selector being passed in
 
-        if is_bearable(selectors, tuple[DiscreteConfig, ContinuousConfig] | DiscreteConfig | ContinuousConfig):
-            selectors = [selectors]
+        assert not (exists(selector) and exists(selectors)), 'you can only pass in `selector` or `selectors`, not both'
+
+        if exists(selector):
+            selectors = [selector]
 
         has_selectors = exists(selectors)
 
