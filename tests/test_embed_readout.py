@@ -316,5 +316,13 @@ def test_multiple_selectors():
     logits = readout(tokens, selector_index = 3)
 
     assert len(logits) == 2
-    assert logits[0].shape == (2, 64, 500)
-    assert logits[1].shape == (2, 64, 500)
+    assert all([logit.shape == (2, 64, 500) for logit in logits])
+
+    sampled = readout.sample(logits, selector_index = 3)
+    assert sampled.shape == (2, 64, 2)
+
+    log_prob = readout.log_prob(logits, sampled, selector_index = 3)
+    assert log_prob.shape == (2, 64, 2)
+
+    entropy = readout.entropy(logits, selector_index = 3)
+    assert entropy.shape == (2, 64, 2)
