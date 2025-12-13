@@ -39,7 +39,7 @@ def first(arr):
     return arr[0]
 
 def xnor(x, y):
-    return not (x ^ y)
+    return x == y
 
 def compact(arr):
     return [*filter(exists, arr)]
@@ -602,7 +602,14 @@ class Readout(Base):
 
             continuous_losses = continuous_losses.mean()
 
-        return discrete_losses + continuous_losses
+        if self.one_of_discrete_or_continuous:
+            if self.has_discrete:
+                return discrete_losses
+
+            if self.has_continuous:
+                return continuous_losses
+
+        return DiscreteContinuous(discrete_losses, continuous_losses)
 
     def kl_div_discrete(
         self,

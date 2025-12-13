@@ -109,9 +109,9 @@ def test_discrete_continuous_autoregressive():
 
     attended = attn(tokens)
 
-    loss = readout(attended, (future_discrete, future_continuous), return_loss = True)
+    discrete_loss, continuous_loss = readout(attended, (future_discrete, future_continuous), return_loss = True)
 
-    loss.backward()
+    (discrete_loss + 0.1 * continuous_loss).backward()
 
     discrete_logits, continuous_mu_log_var = readout(attended)
 
