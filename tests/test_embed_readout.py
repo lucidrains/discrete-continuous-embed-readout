@@ -423,3 +423,56 @@ def test_concat_entropy_log_prob():
 
     entropy = readout.entropy(dist, concat = True)
     assert entropy.shape == (2, 64, 5)
+
+def test_concat_discrete_continuous():
+    embed, _ = EmbedAndReadout(512, num_discrete = 20_000, num_continuous = 5)
+
+    # 1. mixed case
+
+    discrete_input = torch.randint(0, 20_000, (2, 64))
+    continuous_input = torch.randn(2, 64, 5)
+
+    tokens = embed((discrete_input, continuous_input), concat_discrete_continuous = True)
+    assert tokens.shape == (2, 64, 2, 512)
+
+    # 2. discrete only
+
+    tokens = embed((discrete_input, None), selector_index = 0, concat_discrete_continuous = True)
+    assert tokens.shape == (2, 64, 1, 512)
+
+    # 3. continuous only
+
+    tokens = embed((None, continuous_input), selector_index = 0, concat_discrete_continuous = True)
+    assert tokens.shape == (2, 64, 1, 512)
+
+    # 4. mixed case with no sum
+
+    embed = Embed(
+        512,
+        num_discrete = (1000, 1000),
+        num_continuous = 5
+    )
+
+    discrete_input = torch.randint(0, 1000, (2, 64, 2))
+    continuous_input = torch.randn(2, 64, 5)
+
+    tokens = embed(
+        (discrete_input, continuous_input),
+        sum_discrete_sets = False,
+        sum_continuous = False,
+        concat_discrete_continuous = True
+    )
+
+    assert tokens.shape == (2, 64, 2 + 5, 512)
+
+    # 5. mixed case with sum continuous but not discrete
+
+    tokens = embed(
+        (discrete_input, continuous_input),
+        sum_discrete_sets = False,
+        sum_continuous = True,
+        concat_discrete_continuous = True
+    )
+
+    assert tokens.shape == (2, 64, 2 + 1, 512)
+

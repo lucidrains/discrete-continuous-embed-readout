@@ -517,7 +517,8 @@ class Embed(Base):
         sum_discrete_continuous = True,
         normalize_continuous = None,
         return_only_discrete_or_continuous = None,
-        selector_index = None
+        selector_index = None,
+        concat_discrete_continuous = False
     ):
         normalize_continuous = default(normalize_continuous, self.can_norm_continuous)
         return_only_discrete_or_continuous = default(return_only_discrete_or_continuous, self.return_only_discrete_or_continuous)
@@ -552,7 +553,7 @@ class Embed(Base):
 
         discrete_embed = None
 
-        if exists(discrete):
+        if exists(discrete) and selector.has_discrete:
             discrete_embed = selector.discrete_selector.embed(discrete)
 
             # reducing across discrete groups
@@ -564,7 +565,7 @@ class Embed(Base):
 
         continuous_embed = None
 
-        if exists(continuous):
+        if exists(continuous) and selector.has_continuous:
             continuous_embed = selector.continuous_selector.get_embed()
 
             # whether to reduce for continuous
@@ -575,6 +576,16 @@ class Embed(Base):
                 continuous_embed = einsum(continuous_embed, continuous, 'nc d, ... nc -> ... nc d')
 
         # convenience
+
+        if concat_discrete_continuous:
+            ret = []
+            if exists(discrete_embed):
+                ret.append(rearrange(discrete_embed, '... d -> ... 1 d') if sum_discrete_sets else discrete_embed)
+
+            if exists(continuous_embed):
+                ret.append(rearrange(continuous_embed, '... d -> ... 1 d') if sum_continuous else continuous_embed)
+
+            return cat(ret, dim = -2)
 
         if selector.one_of_discrete_or_continuous and return_only_discrete_or_continuous:
             if selector.has_discrete:
