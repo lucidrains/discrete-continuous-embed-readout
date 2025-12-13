@@ -384,7 +384,14 @@ class Readout(Base):
     ):
         assert self.continuous_log_var_embed
 
-        return gaussian_sample(continuous_dist_params, temperature)
+        sampled = gaussian_sample(continuous_dist_params, temperature)
+
+        if not self.can_norm_continuous:
+            return sampled
+
+        mean, std = self.continuous_mean_std.unbind(dim = -1)
+        inverse_normed = sampled * std + mean
+        return inverse_normed
 
     def sample(
         self,
