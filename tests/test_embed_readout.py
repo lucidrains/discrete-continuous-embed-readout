@@ -12,7 +12,8 @@ from discrete_continuous_embed_readout.discrete_continuous_embed_readout import 
     Embed,
     Readout,
     EmbedAndReadout,
-    segmented_softmax
+    segmented_softmax,
+    exists
 )
 
 def test_discrete_autoregressive():
@@ -326,3 +327,99 @@ def test_multiple_selectors():
 
     entropy = readout.entropy(logits, selector_index = 3)
     assert entropy.shape == (2, 64, 2)
+
+    # 5. test override return_both_discrete_and_continuous (using return_only_discrete_or_continuous = False)
+
+    # discrete only
+
+    tokens = embed(token_ids, selector_index = 0)
+    out = readout(tokens, selector_index = 0, return_only_discrete_or_continuous = False)
+    assert isinstance(out, tuple) and hasattr(out, 'discrete') and hasattr(out, 'continuous')
+    assert exists(out.discrete) and not exists(out.continuous)
+
+    # continuous only
+
+    tokens = embed(continuous_input, selector_index = 1)
+    out = readout(tokens, selector_index = 1, return_only_discrete_or_continuous = False)
+    assert isinstance(out, tuple) and hasattr(out, 'discrete') and hasattr(out, 'continuous')
+    assert not exists(out.discrete) and exists(out.continuous)
+
+def test_concat_entropy_log_prob():
+    # 1. mixed case
+
+    selectors = (
+        # discrete (2 groups)
+        [[i for i in range(100)], [i + 100 for i in range(100)]],
+        # continuous (5 dims)
+        [i for i in range(5)]
+    )
+
+    embed, readout = EmbedAndReadout(
+        dim = 512,
+        num_discrete = 300,
+        num_continuous = 30,
+        selectors = selectors,
+        readout_kwargs = dict(
+            continuous_log_var_embed = True
+        )
+    )
+
+    discrete_input = torch.randint(0, 100, (2, 64, 2)) # 2 discrete groups
+    continuous_input = torch.randn(2, 64, 5)
+
+    tokens = embed((discrete_input, continuous_input))
+
+    logits = readout(tokens)
+    sampled = readout.sample(logits)
+
+    # test log prob concat
+
+    log_prob = readout.log_prob(logits, sampled, concat = True)
+
+    assert log_prob.shape == (2, 64, 2 + 5)
+
+    # test entropy concat
+
+    entropy = readout.entropy(logits, concat = True)
+
+    assert entropy.shape == (2, 64, 2 + 5)
+
+    # 2. single discrete case
+
+    embed, readout = EmbedAndReadout(
+        dim = 512,
+        num_discrete = 100,
+        return_only_discrete_or_continuous = True
+    )
+
+    discrete_input = torch.randint(0, 100, (2, 64))
+    tokens = embed(discrete_input)
+    logits = readout(tokens)
+    sampled = readout.sample(logits)
+
+    log_prob = readout.log_prob(logits, sampled, concat = True)
+    assert log_prob.shape == (2, 64, 1)
+
+    entropy = readout.entropy(logits, concat = True)
+    assert entropy.shape == (2, 64, 1)
+
+    # 3. single continuous case
+
+    embed, readout = EmbedAndReadout(
+        dim = 512,
+        num_continuous = 5,
+        readout_kwargs = dict(
+            continuous_log_var_embed = True
+        )
+    )
+
+    continuous_input = torch.randn(2, 64, 5)
+    tokens = embed(continuous_input)
+    dist = readout(tokens)
+    sampled = readout.sample(dist)
+
+    log_prob = readout.log_prob(dist, sampled, concat = True)
+    assert log_prob.shape == (2, 64, 5)
+
+    entropy = readout.entropy(dist, concat = True)
+    assert entropy.shape == (2, 64, 5)

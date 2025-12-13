@@ -352,7 +352,7 @@ class Base(Module):
         dim,
         num_discrete: int | tuple[int, ...] = 0,
         num_continuous: int = 0,
-        selectors: list[tuple[DiscreteConfig, ContinuousConfig] | DiscreteConfig | ContinuousConfig] | None = None,
+        selectors: list[tuple[DiscreteConfig, ContinuousConfig] | DiscreteConfig | ContinuousConfig] | tuple[DiscreteConfig, ContinuousConfig] | DiscreteConfig | ContinuousConfig | None = None,
         continuous_log_var_embed = True,
         continuous_mean_std: Tensor | None = None,
         use_parallel_multi_discrete = True,
@@ -360,6 +360,11 @@ class Base(Module):
         eps = 1e-6
     ):
         super().__init__()
+
+        # automatically handle single selector being passed in
+
+        if is_bearable(selectors, tuple[DiscreteConfig, ContinuousConfig] | DiscreteConfig | ContinuousConfig):
+            selectors = [selectors]
 
         has_selectors = exists(selectors)
 
@@ -390,11 +395,11 @@ class Base(Module):
                 discrete_indices = None
                 continuous_indices = None
 
-                if is_bearable(selector, tuple[list[list[int]], list[int]]):
+                if is_bearable(selector, tuple[DiscreteConfig, ContinuousConfig]):
                     discrete_indices, continuous_indices = selector
-                elif is_bearable(selector, list[list[int]]):
+                elif is_bearable(selector, DiscreteConfig):
                     discrete_indices = selector
-                elif is_bearable(selector, list[int]):
+                elif is_bearable(selector, ContinuousConfig):
                     continuous_indices = selector
                 else:
                     raise ValueError(f'invalid selector config {selector}')
@@ -717,24 +722,49 @@ class Readout(Base):
         dist = mean_log_var_to_normal_dist(continuous_dist_params)
         return dist.log_prob(sampled)
 
+    def maybe_concat(self, output, concat = False):
+        if not concat:
+            return output
+
+        if isinstance(output, DiscreteContinuous):
+            output = (output.discrete, output.continuous)
+
+        output = cast_tuple(output)
+        output = [t for t in output if exists(t)]
+
+        if len(output) == 0:
+            return None
+
+        # if any tensor is (batch, seq) - assume it is single discrete and unsqueeze (so it becomes (batch, seq, 1))
+
+        output = [rearrange(t, '... -> ... 1') if (t.ndim == 2 and self.return_one_discrete_logits) else t for t in output]
+
+        return cat(output, dim = -1)
+
     def log_prob(
         self,
         dist,
         sampled,
-        selector_index = None
+        selector_index = None,
+        concat = False
     ):
         selector = self.get_selector(selector_index)
 
+        output = None
+
         if selector.one_of_discrete_or_continuous:
             if selector.has_discrete:
-                return self.log_prob_discrete(dist, sampled)
+                output = self.log_prob_discrete(dist, sampled)
 
-            if selector.has_continuous:
-                return self.log_prob_continuous(dist, sampled, selector = selector)
+            elif selector.has_continuous:
+                output = self.log_prob_continuous(dist, sampled, selector = selector)
 
-        discrete, continuous = dist
-        discrete_sampled, continuous_sampled = sampled
-        return self.log_prob_discrete(discrete, discrete_sampled), self.log_prob_continuous(continuous, continuous_sampled, selector = selector)
+        else:
+            discrete, continuous = dist
+            discrete_sampled, continuous_sampled = sampled
+            output = DiscreteContinuous(self.log_prob_discrete(discrete, discrete_sampled), self.log_prob_continuous(continuous, continuous_sampled, selector = selector))
+
+        return self.maybe_concat(output, concat = concat)
 
     def entropy_discrete(
         self,
@@ -774,19 +804,25 @@ class Readout(Base):
     def entropy(
         self,
         dist,
-        selector_index = None
+        selector_index = None,
+        concat = False
     ):
         selector = self.get_selector(selector_index)
 
+        output = None
+
         if selector.one_of_discrete_or_continuous:
             if selector.has_discrete:
-                return self.entropy_discrete(dist)
+                output = self.entropy_discrete(dist)
 
-            if selector.has_continuous:
-                return self.entropy_continuous(dist, selector = selector)
+            elif selector.has_continuous:
+                output = self.entropy_continuous(dist, selector = selector)
 
-        discrete, continuous = dist
-        return DiscreteContinuous(self.entropy_discrete(discrete), self.entropy_continuous(continuous, selector = selector))
+        else:
+            discrete, continuous = dist
+            output = DiscreteContinuous(self.entropy_discrete(discrete), self.entropy_continuous(continuous, selector = selector))
+
+        return self.maybe_concat(output, concat = concat)
 
     def forward(
         self,
