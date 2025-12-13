@@ -122,6 +122,11 @@ def gaussian_sample(mu_log_var, temperature = 1.):
     std = (0.5 * log_var).exp()
     return mu + torch.rand_like(std) * temperature
 
+def mean_log_var_to_normal_dist(mean_log_var):
+    mean, log_var = mean_log_var.unbind(dim = -1)
+    std = (0.5 * log_var).exp()
+    return Normal(mean, std)
+
 # multi categorical
 
 def gumbel_sample_multi_categorical(
@@ -442,10 +447,8 @@ class Readout(Base):
         sampled
     ):
         assert self.continuous_log_var_embed
-
-        mean, log_var = continuous_dist_params.unbind(dim = -1)
-        std = (0.5 * log_var).exp()
-        return Normal(mean, std).log_prob(sampled)
+        dist = mean_log_var_to_normal_dist(continuous_dist_params)
+        return dist.log_prob(sampled)
 
     def log_prob(
         self,
@@ -493,10 +496,8 @@ class Readout(Base):
         continuous_dist_params
     ):
         assert self.continuous_log_var_embed
-
-        mean, log_var = continuous_dist_params.unbind(dim = -1)
-        std = (0.5 * log_var).exp()
-        return Normal(mean, std).entropy()
+        dist = mean_log_var_to_normal_dist(continuous_dist_params)
+        return dist.entropy()
 
     def entropy(
         self,
@@ -591,10 +592,7 @@ class Readout(Base):
         if self.has_continuous:
 
             if self.continuous_log_var_embed:
-                mean, log_var = continuous_dist_params.unbind(dim = -1)
-                std = (0.5 * log_var).exp()
-
-                gaussian = Normal(mean, std)
+                gaussian = mean_log_var_to_normal_dist(continuous_dist_params)
 
                 continuous_losses = -gaussian.log_prob(continuous_targets)
             else:
@@ -657,13 +655,8 @@ class Readout(Base):
     ):
         assert self.continuous_log_var_embed
 
-        mean_true, log_var_true = continuous_dist_params_true.unbind(dim = -1)
-        std_true = (0.5 * log_var_true).exp()
-        dist_true = Normal(mean_true, std_true)
-
-        mean_pred, log_var_pred = continuous_dist_params_pred.unbind(dim = -1)
-        std_pred = (0.5 * log_var_pred).exp()
-        dist_pred = Normal(mean_pred, std_pred)
+        dist_true = mean_log_var_to_normal_dist(continuous_dist_params_true)
+        dist_pred = mean_log_var_to_normal_dist(continuous_dist_params_pred)
 
         return torch.distributions.kl.kl_divergence(dist_true, dist_pred)
 
