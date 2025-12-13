@@ -225,3 +225,96 @@ def test_kl_div_parallel_equality():
     kl_sequential = readout.kl_div_discrete(logits_true, logits_pred)
 
     assert torch.allclose(kl_parallel, kl_sequential, atol = 1e-6)
+
+def test_multiple_selectors():
+    # 1. discrete AR (20000)
+    # 2. continuous AR (5)
+    # 3. mixed (20000 distinct from 1., 5 distinct from 2.)
+    # 4. multi-discrete (500, 500)
+
+    # 1. discrete AR config
+
+    config_discrete_ar = [[i for i in range(20000)]]
+
+    # 2. continuous AR config
+
+    config_continuous_ar = [i for i in range(5)]
+
+    # 3. mixed config
+
+    config_mixed_discrete = [[i + 20000 for i in range(20000)]]
+    config_mixed_continuous = [i + 5 for i in range(5)]
+
+    # 4. multi-discrete config
+
+    config_multi_discrete = [
+        [i + 40000 for i in range(500)],
+        [i + 40500 for i in range(500)]
+    ]
+
+    selectors = [
+        config_discrete_ar,
+        config_continuous_ar,
+        (config_mixed_discrete, config_mixed_continuous),
+        config_multi_discrete
+    ]
+
+    embed, readout = EmbedAndReadout(
+        dim = 512,
+        num_discrete = 41000,
+        num_continuous = 10,
+        selectors = selectors,
+        readout_kwargs = dict(
+            continuous_log_var_embed = True
+        )
+    )
+
+    # 1. discrete AR
+
+    token_ids = torch.randint(0, 20000, (2, 64))
+
+    tokens = embed(token_ids, selector_index = 0)
+    assert tokens.shape == (2, 64, 512)
+
+    logits = readout(tokens, selector_index = 0)
+    assert logits.shape == (2, 64, 20000)
+
+    sampled = readout.sample(logits, selector_index = 0)
+    assert sampled.shape == (2, 64)
+
+    # 2. continuous AR
+
+    continuous_input = torch.randn(2, 64, 5)
+
+    tokens = embed(continuous_input, selector_index = 1)
+    assert tokens.shape == (2, 64, 512)
+
+    dist = readout(tokens, selector_index = 1)
+    assert dist.shape == (2, 64, 5, 2)
+
+    # 3. mixed
+
+    discrete_inp = torch.randint(0, 20000, (2, 64))
+    continuous_inp = torch.randn(2, 64, 5)
+
+    tokens = embed((discrete_inp, continuous_inp), selector_index = 2)
+    assert tokens.shape == (2, 64, 512)
+
+    out = readout(tokens, selector_index = 2)
+    discrete_logits, continuous_dist = out.discrete, out.continuous
+
+    assert discrete_logits.shape == (2, 64, 20000)
+    assert continuous_dist.shape == (2, 64, 5, 2)
+
+    # 4. multi-discrete
+
+    multi_discrete_inp = torch.randint(0, 500, (2, 64, 2))
+
+    tokens = embed(multi_discrete_inp, selector_index = 3)
+    assert tokens.shape == (2, 64, 512)
+
+    logits = readout(tokens, selector_index = 3)
+
+    assert len(logits) == 2
+    assert logits[0].shape == (2, 64, 500)
+    assert logits[1].shape == (2, 64, 500)
