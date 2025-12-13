@@ -178,7 +178,7 @@ def test_multi_discrete_embed():
 
     embed = Embed(512, num_discrete = (500, 500))
 
-    embedded_groups = embed(token_ids, sum_discrete_groups = False)
+    embedded_groups = embed(token_ids, sum_discrete_sets = False)
 
     assert embedded_groups.shape == (2, 64, 2, 512)
 

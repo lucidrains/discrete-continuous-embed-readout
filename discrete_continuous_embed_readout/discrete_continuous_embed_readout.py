@@ -5,11 +5,12 @@ from beartype.door import is_bearable
 
 from collections import namedtuple
 from functools import partial
+from itertools import count
 
 import torch
 from torch import nn, Tensor, arange, tensor, is_tensor, stack, cat
 import torch.nn.functional as F
-from torch.nn import Module
+from torch.nn import Module, ModuleList
 from torch.utils._pytree import tree_map
 
 from torch.distributions import Normal
@@ -48,8 +49,20 @@ def compact(arr):
 def default(v, d):
     return v if exists(v) else d
 
+def flatten(arr):
+    return [el for sub_arr in arr for el in sub_arr]
+
 def cast_tuple(t):
     return (t,) if not isinstance(t, tuple) else t
+
+def safe_cat(tensors, dim = 0):
+    tensors = [*filter(exists, tensors)]
+    if len(tensors) == 0:
+        return None
+    elif len(tensors) == 1:
+        return first(tensors)
+
+    return cat(tensors, dim = dim)
 
 # tensor helpers
 
@@ -121,7 +134,7 @@ def gumbel_sample(t, temperature = 1., eps = 1e-20):
 def gaussian_sample(mu_log_var, temperature = 1.):
     mu, log_var = mu_log_var.unbind(dim = -1)
     std = (0.5 * log_var).exp()
-    return mu + torch.rand_like(std) * temperature
+    return mu + torch.randn_like(std) * temperature
 
 def mean_log_var_to_normal_dist(mean_log_var):
     mean, log_var = mean_log_var.unbind(dim = -1)
@@ -155,6 +168,92 @@ def gumbel_sample_multi_categorical(
 
     return sampled
 
+# buffer container, so continuous selector can contain a reference
+
+class BufferModule(Module):
+    def __init__(self, tensor):
+        super().__init__()
+        self.register_buffer('data', tensor)
+
+# selectors
+
+class DiscreteSelector(Module):
+    @beartype
+    def __init__(
+        self,
+        discrete_set_indices: list[list[int]],
+        embeddings: nn.Embedding,
+    ):
+        super().__init__()
+
+        discrete_set_lens = list(map(len, discrete_set_indices))
+        discrete_set_offsets = exclusive_cumsum(discrete_set_lens)
+
+        self.num_discrete_sets = len(discrete_set_indices)
+
+        self.embeddings = embeddings
+
+        self.register_buffer('discrete_set_lens', tensor(discrete_set_lens), persistent = False)
+        self.register_buffer('discrete_indices', tensor(flatten(discrete_set_indices)), persistent = False)
+        self.register_buffer('discrete_set_offsets', discrete_set_offsets, persistent = False)
+
+    def embed(
+        self,
+        indices
+    ):
+        if self.num_discrete_sets > 1:
+            assert indices.shape[-1] == self.num_discrete_sets, f'shape of input must end with {self.num_discrete_sets}, as there are two discrete groups'
+            indices = indices + self.discrete_set_offsets
+
+        embed_indices = self.discrete_indices[indices]
+
+        return self.embeddings(embed_indices)
+
+    def get_readout_embeds(
+        self
+    ):
+        return self.embeddings(self.discrete_indices)
+
+    def split_packed(
+        self,
+        logits
+    ):
+        return logits.split(self.discrete_set_lens.tolist(), dim = -1)
+
+class ContinuousSelector(Module):
+    @beartype
+    def __init__(
+        self,
+        continuous_indices: list[int],
+        embed: nn.Embedding,
+        num_continuous,
+        embedding_offset,
+        continuous_mean_std: Module | None,
+        continuous_log_var_embed
+    ):
+        super().__init__()
+        # embedding is [discrete] [continuous mean] [?continuous log var]
+
+        continuous_indices = tensor(continuous_indices)
+        assert continuous_indices.unique().numel() == continuous_indices.numel()
+
+        continuous_log_var_indices = None
+        if continuous_log_var_embed:
+            continuous_log_var_indices = continuous_indices + num_continuous
+
+        self.embed = embed
+        self.continuous_mean_std = continuous_mean_std
+        self.continuous_log_var_embed = continuous_log_var_embed
+
+        self.register_buffer('continuous_indices', continuous_indices + embedding_offset, persistent = False)
+        self.register_buffer('continuous_mean_log_var_indices', safe_cat((continuous_indices, continuous_log_var_indices)), persistent = False)
+
+    def get_embed(self):
+        return self.embed(self.continuous_indices)
+
+    def get_mean_logvar_embed(self):
+        return self.embed(self.continuous_mean_log_var_indices)
+
 # base
 
 class Base(Module):
@@ -179,6 +278,9 @@ class Base(Module):
 
         total = total_discrete + total_continuous
 
+        self.has_discrete = total_discrete > 0
+        self.has_continuous = num_continuous > 0
+
         assert total > 0, 'cannot have both discrete and continuous disabled'
 
         self.dim = dim
@@ -190,17 +292,9 @@ class Base(Module):
         self.embeddings = nn.Embedding(total, dim)
         nn.init.normal_(self.embeddings.weight, std = 1e-2)
 
-        # continuous related
-
-        self.has_continuous = num_continuous > 0
-        self.continuous_offset = total_discrete
-        self.continuous_log_var_embed = continuous_log_var_embed
-
-        self.register_buffer('continuous_indices', arange(num_continuous) + self.continuous_offset, persistent = False)
-        self.register_buffer('continuous_mean_log_var_indices', arange(total_continuous) + self.continuous_offset, persistent = False)
-
         # maybe norm and inverse norm
 
+        self.continuous_mean_std = None
         self.can_norm_continuous = exists(continuous_mean_std)
 
         if self.can_norm_continuous:
@@ -208,27 +302,45 @@ class Base(Module):
             assert continuous_mean_std.shape == (num_continuous, 2)
             assert (continuous_mean_std[..., -1] > 0).all()
 
-            self.register_buffer('continuous_mean_std', continuous_mean_std)
-
-        self.eps = eps
+            self.continuous_mean_std = BufferModule(continuous_mean_std)
 
         # discrete related computed values
 
         self.use_parallel_multi_discrete = use_parallel_multi_discrete # sampling, entropy, log prob in parallel for multi-discrete
 
-        self.has_discrete = total_discrete > 0
-        self.num_discrete_groups = len(num_discrete)
+        counter = count(0)
+        default_discrete_indices = [[next(counter) for _ in range(n)] for n in num_discrete]
 
-        discrete_group_offsets = exclusive_cumsum(num_discrete)
+        self.discrete_selector = DiscreteSelector(
+            default_discrete_indices,
+            self.embeddings
+        )
 
-        self.register_buffer('default_num_discrete', tensor(num_discrete), persistent = False)
-        self.register_buffer('default_discrete_indices', arange(total_discrete), persistent = False)
-        self.register_buffer('default_discrete_group_offsets', discrete_group_offsets, persistent = False)
+        self.num_discrete_sets = len(num_discrete)
+
+        # continuous related
+
+        default_continuous_indices = arange(num_continuous).tolist()
+
+        self.continuous_selector = ContinuousSelector(
+            default_continuous_indices,
+            self.embeddings,
+            num_continuous = num_continuous,
+            embedding_offset = total_discrete,
+            continuous_mean_std = self.continuous_mean_std,
+            continuous_log_var_embed = continuous_log_var_embed
+        )
+
+        self.continuous_log_var_embed = continuous_log_var_embed
 
         # inferring
 
         self.one_of_discrete_or_continuous = self.has_discrete ^ self.has_continuous
         self.return_only_discrete_or_continuous = return_only_discrete_or_continuous
+
+        # epsilon
+
+        self.eps = eps
 
 # embed and readout
 
@@ -236,18 +348,18 @@ class Embed(Base):
     def __init__(
         self,
         *args,
-        auto_append_discrete_group_dim = None,
+        auto_append_discrete_set_dim = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs, continuous_log_var_embed = False)
 
-        self.auto_append_discrete_group_dim = default(auto_append_discrete_group_dim, self.num_discrete_groups == 1)
-        assert not (self.auto_append_discrete_group_dim and self.num_discrete_groups > 1), 'cannot have greater than one discrete group and auto-unsqueezing of a dimension'
+        self.auto_append_discrete_set_dim = default(auto_append_discrete_set_dim, self.num_discrete_sets == 1)
+        assert not (self.auto_append_discrete_set_dim and self.num_discrete_sets > 1), 'cannot have greater than one discrete group and auto-unsqueezing of a dimension'
 
     def forward(
         self,
         inp: Tensor | tuple[Tensor, Tensor],
-        sum_discrete_groups = True,
+        sum_discrete_sets = True,
         sum_continuous = True,
         sum_discrete_continuous = True,
         normalize_continuous = None,
@@ -277,14 +389,14 @@ class Embed(Base):
 
         if (
             exists(discrete) and
-            self.auto_append_discrete_group_dim
+            self.auto_append_discrete_set_dim
         ):
             discrete = rearrange(discrete, '... -> ... 1')
 
         # maybe norm continuous
 
         if self.can_norm_continuous and exists(continuous):
-            mean, std = self.continuous_mean_std.unbind(dim = -1)
+            mean, std = self.continuous_mean_std.data.unbind(dim = -1)
             continuous = (continuous - mean) / std.clamp_min(self.eps)
 
         # take care of discrete
@@ -292,17 +404,11 @@ class Embed(Base):
         discrete_embed = None
 
         if exists(discrete):
-            if self.num_discrete_groups > 1:
-                assert discrete.shape[-1] == self.num_discrete_groups, f'shape of input must end with {self.num_discrete_groups}, as there are two discrete groups'
-                discrete = discrete + self.default_discrete_group_offsets
-
-            discrete = self.default_discrete_indices[discrete]
-
-            discrete_embed = self.embeddings(discrete)
+            discrete_embed = self.discrete_selector.embed(discrete)
 
             # reducing across discrete groups
 
-            if sum_discrete_groups:
+            if sum_discrete_sets:
                 discrete_embed = reduce(discrete_embed, '... nd d -> ... d', 'sum')
 
         # take care of continuous
@@ -310,7 +416,7 @@ class Embed(Base):
         continuous_embed = None
 
         if exists(continuous):
-            continuous_embed = self.embeddings(self.continuous_indices)
+            continuous_embed = self.continuous_selector.get_embed()
 
             # whether to reduce for continuous
 
@@ -334,7 +440,7 @@ class Embed(Base):
 
         if (
             not sum_discrete_continuous or
-            not sum_discrete_groups or
+            not sum_discrete_sets or
             not sum_continuous
         ):
             return output
@@ -353,8 +459,8 @@ class Readout(Base):
         **kwargs
     ):
         super().__init__(*args, **kwargs)
-        self.return_one_discrete_logits = default(return_one_discrete_logits, self.num_discrete_groups == 1)
-        assert not (self.return_one_discrete_logits and self.num_discrete_groups > 1), 'cannot return only one discrete logit group if greater than one group'
+        self.return_one_discrete_logits = default(return_one_discrete_logits, self.num_discrete_sets == 1)
+        assert not (self.return_one_discrete_logits and self.num_discrete_sets > 1), 'cannot return only one discrete logit group if greater than one group'
 
         self.register_buffer('zero', tensor(0.), persistent = False)
 
@@ -395,7 +501,7 @@ class Readout(Base):
         if not self.can_norm_continuous:
             return sampled
 
-        mean, std = self.continuous_mean_std.unbind(dim = -1)
+        mean, std = self.continuous_mean_std.data.unbind(dim = -1)
         inverse_normed = sampled * std + mean
         return inverse_normed
 
@@ -543,17 +649,17 @@ class Readout(Base):
         discrete_logits_for_groups = None
 
         if self.has_discrete:
-            discrete_unembed = self.embeddings(self.default_discrete_indices)
+            discrete_unembed = self.discrete_selector.get_readout_embeds()
             all_discrete_logits = einsum(embed, discrete_unembed, '... d, nd d -> ... nd')
 
-            discrete_logits_for_groups = all_discrete_logits.split(self.default_num_discrete.tolist(), dim = -1)
+            discrete_logits_for_groups = self.discrete_selector.split_packed(all_discrete_logits)
 
         # continuous unembedding
 
         continuous_dist_params = None
 
         if self.has_continuous:
-            continuous_unembed = self.embeddings(self.continuous_mean_log_var_indices)
+            continuous_unembed = self.continuous_selector.get_mean_logvar_embed()
             continuous_dist_params = einsum(embed, continuous_unembed, '... d, nc d -> ... nc')
 
             if self.continuous_log_var_embed:
