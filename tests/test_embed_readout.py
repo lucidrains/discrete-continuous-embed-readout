@@ -5,7 +5,6 @@ param = pytest.mark.parametrize
 
 import torch
 from x_transformers import Decoder
-from einops import rearrange
 
 # tests
 
@@ -561,3 +560,56 @@ def test_auto_squeeze_single_output():
 
     dist_continuous_sq = readout_continuous_sq(tokens_continuous)
     assert dist_continuous_sq.shape == (2, 64, 1, 2)
+
+def test_readout_unreduced_loss():
+    embed, readout = EmbedAndReadout(512, num_discrete = 100, num_continuous = 5)
+
+    discrete_input = torch.randint(0, 100, (2, 64))
+    continuous_input = torch.randn(2, 64, 5)
+
+    tokens = embed((discrete_input, continuous_input))
+
+    # test unreduced loss
+
+    discrete_loss, continuous_loss = readout(
+        tokens,
+        (discrete_input, continuous_input),
+        return_loss = True,
+        return_unreduced_loss = True
+    )
+
+    assert discrete_loss.shape == (2, 64, 1)
+    assert continuous_loss.shape == (2, 64, 5)
+
+    # test masked loss
+
+    mask = torch.randint(0, 2, (2, 64)).bool()
+
+    masked_loss = readout(
+        tokens,
+        (discrete_input, continuous_input),
+        return_loss = True,
+        loss_mask = mask
+    )
+
+    discrete_loss_masked = discrete_loss * mask[..., None]
+    continuous_loss_masked = continuous_loss * mask[..., None]
+
+    expected_discrete_loss = discrete_loss_masked.sum() / mask.sum()
+    expected_continuous_loss = continuous_loss_masked.sum() / mask.sum()
+
+    assert torch.allclose(masked_loss.discrete, expected_discrete_loss)
+    assert torch.allclose(masked_loss.continuous, expected_continuous_loss)
+
+    # test unreduced masked loss
+
+    unreduced_masked_loss = readout(
+        tokens,
+        (discrete_input, continuous_input),
+        return_loss = True,
+        return_unreduced_loss = True,
+        loss_mask = mask
+    )
+
+    assert torch.allclose(unreduced_masked_loss.discrete, discrete_loss_masked)
+    assert torch.allclose(unreduced_masked_loss.continuous, continuous_loss_masked)

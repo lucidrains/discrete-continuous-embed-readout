@@ -623,9 +623,11 @@ class Readout(Base):
         *args,
         return_one_discrete_logits = None,
         auto_squeeze_single_output = True,
+        ignore_index = -1,
         **kwargs
     ):
         super().__init__(*args, **kwargs)
+        self.ignore_index = ignore_index
         self.auto_squeeze_single_output = auto_squeeze_single_output
         self.return_one_discrete_logits = default(return_one_discrete_logits, self.num_discrete_sets == 1)
         assert not (self.return_one_discrete_logits and self.num_discrete_sets > 1), 'cannot return only one discrete logit group if greater than one group'
@@ -730,7 +732,19 @@ class Readout(Base):
 
         # gather log probs
 
+        # handle ignore index
+
+        has_ignore_index = exists(self.ignore_index)
+
+        if has_ignore_index:
+             ignore_mask = sampled == self.ignore_index
+             indices = indices.masked_fill(ignore_mask, 0)
+
         log_probs = log_softmaxed.gather(-1, indices)
+
+        if has_ignore_index:
+            log_probs = log_probs.masked_fill(ignore_mask, 0.)
+
         return log_probs
 
     def log_prob_continuous(
@@ -847,11 +861,141 @@ class Readout(Base):
 
         return self.maybe_concat(output, concat = concat)
 
+    def calculate_loss(
+        self,
+        logits,
+        targets,
+        selector_index = 0,
+        mask = None,
+        return_unreduced_loss = False
+    ):
+        selector = self.get_selector(selector_index)
+
+        # handle destructuring of logits
+
+        discrete_logits = logits
+        continuous_dist_params = logits
+
+        if selector.has_discrete and selector.has_continuous:
+            assert isinstance(logits, (tuple, list, DiscreteContinuous)) and len(logits) == 2
+            discrete_logits, continuous_dist_params = logits
+
+        # handle destructuring of targets
+
+        discrete_targets = targets
+        continuous_targets = targets
+
+        if selector.has_discrete and selector.has_continuous:
+            assert isinstance(targets, (tuple, list, DiscreteContinuous)) and len(targets) == 2
+            discrete_targets, continuous_targets = targets
+
+        # take care of only one discrete logit group, as in language modeling
+
+        if self.return_one_discrete_logits and selector.has_discrete and selector.discrete_selector.num_discrete_sets == 1 and self.auto_squeeze_single_output:
+            discrete_targets = rearrange(discrete_targets, '... -> ... 1')
+
+        # calculations
+
+        discrete_losses = self.zero
+
+        if selector.has_discrete:
+            if self.use_parallel_multi_discrete:
+                log_probs = self.log_prob_discrete(discrete_logits, discrete_targets)
+                discrete_losses = -log_probs
+            else:
+                discrete_losses = []
+                for discrete_logit, one_target in zip(discrete_logits, discrete_targets.unbind(dim = -1)):
+                    discrete_losses.append(F.cross_entropy(rearrange(discrete_logit, 'b ... c -> b c ...'), one_target, reduction = 'none', ignore_index = self.ignore_index))
+
+                if len(discrete_losses) > 1:
+                    discrete_losses = stack(discrete_losses, dim = -1)
+                else:
+                    discrete_losses = first(discrete_losses)
+
+        continuous_losses = self.zero
+
+        if selector.has_continuous:
+            if selector.continuous_log_var_embed:
+                gaussian = mean_log_var_to_normal_dist(continuous_dist_params)
+                continuous_losses = -gaussian.log_prob(continuous_targets)
+            else:
+                continuous_losses = F.mse_loss(continuous_dist_params, continuous_targets, reduction = 'none')
+
+        # handle masking
+
+        if exists(mask):
+            if selector.has_discrete:
+                discrete_mask = mask
+                if discrete_losses.ndim == (mask.ndim + 1):
+                    discrete_mask = rearrange(mask, '... -> ... 1')
+
+                discrete_losses = discrete_losses * discrete_mask
+
+            if selector.has_continuous:
+                continuous_mask = mask
+                if continuous_losses.ndim == (mask.ndim + 1):
+                    continuous_mask = rearrange(mask, '... -> ... 1')
+
+                continuous_losses = continuous_losses * continuous_mask
+
+        # return early if unreduced
+
+        if return_unreduced_loss:
+            if selector.one_of_discrete_or_continuous:
+                if selector.has_discrete:
+                    return discrete_losses
+
+                if selector.has_continuous:
+                    return continuous_losses
+
+            return DiscreteContinuous(discrete_losses, continuous_losses)
+
+        # reduce
+
+        if selector.has_discrete:
+            discrete_divisor = mask.sum() if exists(mask) else tensor(discrete_losses.numel(), device = self.zero.device)
+
+            if exists(self.ignore_index):
+                valid_ignore_mask = (discrete_targets != self.ignore_index)
+
+                if valid_ignore_mask.ndim > discrete_losses.ndim:
+                    valid_ignore_mask = valid_ignore_mask.any(dim = -1)
+
+                # if the losses have an extra action dimension, but the targets do not (which is the case for single discrete action with auto_squeeze), we need to expand the ignore mask
+
+                if valid_ignore_mask.ndim < discrete_losses.ndim:
+                    valid_ignore_mask = repeat(valid_ignore_mask, '... -> ... 1')
+
+                if exists(mask):
+                    if valid_ignore_mask.ndim == (mask.ndim + 1):
+                         mask = rearrange(mask, '... -> ... 1')
+
+                    valid_ignore_mask = valid_ignore_mask & mask
+
+                discrete_divisor = valid_ignore_mask.sum()
+
+            discrete_losses = discrete_losses.sum() / discrete_divisor.clamp_min(1.)
+
+        if selector.has_continuous:
+            continuous_divisor = mask.sum() if exists(mask) else tensor(continuous_losses.numel(), device = self.zero.device)
+            continuous_losses = continuous_losses.sum() / continuous_divisor.clamp_min(1.)
+
+        if selector.one_of_discrete_or_continuous:
+            if selector.has_discrete:
+                return discrete_losses
+
+            if selector.has_continuous:
+                return continuous_losses
+
+        return DiscreteContinuous(discrete_losses, continuous_losses)
+
     def forward(
         self,
         embed,
         targets = None,
         return_loss = False,
+        return_unreduced_loss = False,
+        loss_mask = None,
         return_only_discrete_or_continuous = None,
         selector_index = None
     ):
@@ -897,55 +1041,23 @@ class Readout(Base):
 
             return DiscreteContinuous(discrete_logits_for_groups, continuous_dist_params)
 
-        # handle destructing of target
-
-        discrete_targets = targets
-        continuous_targets = targets
-
-        if selector.has_discrete and selector.has_continuous:
-            assert isinstance(targets, (tuple, list)) and len(targets) == 2
-            discrete_targets, continuous_targets = targets
-
-        # take care of only one discrete logit group, as in language modeling
-
-        if self.return_one_discrete_logits and selector.has_discrete and selector.discrete_selector.num_discrete_sets == 1 and self.auto_squeeze_single_output:
-            discrete_targets = rearrange(discrete_targets, '... -> ... 1')
-
         # handle basic losses
 
-        discrete_losses = self.zero
-
-        if selector.has_discrete:
-            if self.use_parallel_multi_discrete:
-                log_probs = self.log_prob_discrete(discrete_logits_for_groups, discrete_targets)
-                discrete_losses = -log_probs.sum(dim = -1).mean()
-            else:
-                discrete_losses = tuple(F.cross_entropy(rearrange(discrete_logit, 'b ... nd -> b nd ...'), one_target) for discrete_logit, one_target in zip(discrete_logits_for_groups, discrete_targets.unbind(dim = -1)))
-                discrete_losses = sum(discrete_losses)
-
-        continuous_losses = self.zero
-
-        if selector.has_continuous:
-
-            if selector.continuous_log_var_embed:
-                gaussian = mean_log_var_to_normal_dist(continuous_dist_params)
-
-                continuous_losses = -gaussian.log_prob(continuous_targets)
-            else:
-                continuous_losses = F.mse_loss(continuous_dist_params, continuous_targets, reduction = 'none')
-
-            continuous_losses = reduce(continuous_losses, '... nc -> ...', 'sum')
-
-            continuous_losses = continuous_losses.mean()
+        logits = DiscreteContinuous(discrete_logits_for_groups, continuous_dist_params)
 
         if selector.one_of_discrete_or_continuous:
             if selector.has_discrete:
-                return discrete_losses
+                logits = discrete_logits_for_groups
+            elif selector.has_continuous:
+                logits = continuous_dist_params
 
-            if selector.has_continuous:
-                return continuous_losses
-
-        return DiscreteContinuous(discrete_losses, continuous_losses)
+        return self.calculate_loss(
+            logits,
+            targets,
+            selector_index = selector_index,
+            mask = loss_mask,
+            return_unreduced_loss = return_unreduced_loss
+        )
 
     def kl_div_discrete(
         self,

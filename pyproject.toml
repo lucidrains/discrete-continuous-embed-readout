@@ -1,6 +1,6 @@
 [project]
 name = "discrete-continuous-embed-readout"
-version = "0.0.34"
+version = "0.0.35"
 description = "Discrete Continuous Embed Readout"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
