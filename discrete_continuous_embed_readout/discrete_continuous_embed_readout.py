@@ -175,7 +175,159 @@ def gumbel_sample_multi_categorical(
 
     return sampled
 
-# buffer container, so continuous selector can contain a reference
+class MultiCategorical:
+    def __init__(
+        self,
+        logits: Tensor | list[Tensor] | tuple[Tensor, ...],
+        use_parallel_multi_discrete = True,
+        ignore_index = -1
+    ):
+        self.logits = logits
+        self.ignore_index = ignore_index
+
+        is_list_tuple = isinstance(logits, (list, tuple))
+
+        first_tensor = first(logits) if is_list_tuple else logits
+        is_mps = first_tensor.device.type == 'mps'
+
+        self.use_parallel_multi_discrete = use_parallel_multi_discrete and not is_mps
+        self._is_list_tuple = is_list_tuple
+
+    @property
+    def param(self):
+        return self.logits
+
+    def sample(
+        self,
+        temperature = 1.,
+        eps = 1e-20
+    ):
+        # handle list or tuple of logits
+
+        logits = self.logits
+
+        if not self._is_list_tuple:
+            logits = (logits,)
+
+        if len(logits) > 1 and self.use_parallel_multi_discrete:
+            sampled = gumbel_sample_multi_categorical(logits, temperature = temperature, eps = eps)
+        else:
+            sampled = tree_map_tensor(logits, partial(gumbel_sample, temperature = temperature, eps = eps))
+            sampled = stack(sampled, dim = -1)
+
+        if not self._is_list_tuple:
+            sampled = rearrange(sampled, '... 1 -> ...')
+
+        return sampled
+
+    def log_prob(self, value):
+        logits = self.logits
+
+        if not self._is_list_tuple:
+            # if single tensor passed in, but value has an extra dimension (sampled auto-squeezed), unsqueeze back
+            logits = (logits,)
+
+            if value.ndim == (logits[0].ndim - 1):
+                value = rearrange(value, '... -> ... 1')
+
+        assert len(logits) > 0, 'empty discrete logits'
+
+        lens = tensor([d.shape[-1] for d in logits], device = first(logits).device)
+        offsets = exclusive_cumsum(lens)
+
+        indices = value + offsets
+
+        # handle log softmax
+
+        if self.use_parallel_multi_discrete:
+            logits, lens = cat_with_lens(logits)
+            log_softmaxed = log(segmented_softmax(logits, lens))
+        else:
+            log_softmaxed = [logit.log_softmax(dim = -1) for logit in logits]
+            log_softmaxed = cat(log_softmaxed, dim = -1)
+
+        # handle ignore index
+
+        has_ignore_index = exists(self.ignore_index)
+
+        if has_ignore_index:
+             ignore_mask = value == self.ignore_index
+             indices = indices.masked_fill(ignore_mask, 0)
+
+        # gather log probs
+
+        log_probs = log_softmaxed.gather(-1, indices)
+
+        if has_ignore_index:
+            log_probs = log_probs.masked_fill(ignore_mask, 0.)
+
+        if not self._is_list_tuple:
+            log_probs = rearrange(log_probs, '... 1 -> ...')
+
+        return log_probs
+
+    def entropy(self):
+        logits = self.logits
+
+        if not self._is_list_tuple:
+            return calc_entropy(logits)
+
+        assert len(logits) > 0, 'empty discrete logits'
+
+        if self.use_parallel_multi_discrete:
+            logits, lens = cat_with_lens(logits)
+            probs = segmented_softmax(logits, lens)
+
+            neg_prob_log_prob = -probs * log(probs)
+            neg_prob_log_prob = rearrange(neg_prob_log_prob, '... l -> l ...')
+
+            entropies = torch.segment_reduce(neg_prob_log_prob, 'sum', lengths = lens)
+        else:
+            entropies = [calc_entropy(logit) for logit in logits]
+
+        entropies = rearrange(entropies, 'nd ... -> ... nd')
+        return entropies
+
+    def kl_div(self, other):
+        logits_true = self.logits
+        logits_pred = other.logits
+
+        if not self._is_list_tuple:
+            logits_true = (logits_true,)
+            logits_pred = (logits_pred,)
+
+        assert len(logits_true) > 0, 'empty logits'
+        assert len(logits_true) == len(logits_pred), f'logits length mismatch: true {len(logits_true)} vs pred {len(logits_pred)}'
+
+        if self.use_parallel_multi_discrete:
+            logits_true, lens = cat_with_lens(logits_true)
+            logits_pred, _ = cat_with_lens(logits_pred)
+
+            probs_true = segmented_softmax(logits_true, lens)
+            probs_pred = segmented_softmax(logits_pred, lens)
+
+            kl = probs_true * (log(probs_true) - log(probs_pred))
+            kl = rearrange(kl, '... l -> l ...')
+
+            kl_divs = torch.segment_reduce(kl, 'sum', lengths = lens)
+            kl_divs = rearrange(kl_divs, 'nd ... -> ... nd')
+        else:
+            kl_divs = []
+
+            for l_true, l_pred in zip(logits_true, logits_pred):
+                probs_true = l_true.softmax(dim = -1)
+                log_probs_true = l_true.log_softmax(dim = -1)
+                log_probs_pred = l_pred.log_softmax(dim = -1)
+
+                kl = F.kl_div(log_probs_pred, log_probs_true, reduction = 'none', log_target = True)
+                kl_divs.append(kl.sum(dim = -1))
+
+            kl_divs = stack(kl_divs, dim = -1)
+
+        if not self._is_list_tuple:
+            kl_divs = rearrange(kl_divs, '... 1 -> ...')
+
+        return kl_divs
 
 class BufferModule(Module):
     def __init__(self, tensor):
@@ -241,7 +393,6 @@ class ContinuousSelector(Module):
         super().__init__()
         # embedding is [discrete] [continuous mean] [?continuous log var]
 
-        continuous_indices = tensor(continuous_indices)
         continuous_indices = tensor(continuous_indices)
         assert continuous_indices.unique().numel() == continuous_indices.numel(), f'continuous indices must be unique, received {continuous_indices.tolist()}'
 
@@ -687,11 +838,12 @@ class Readout(Base):
 
         discrete_logits = [filter_fn(t, **filter_kwargs) for t in discrete_logits]
 
-        if len(discrete_logits) > 1 and self.use_parallel_multi_discrete:
-            sampled = gumbel_sample_multi_categorical(discrete_logits, temperature = temperature)
-        else:
-            sampled = tree_map_tensor(discrete_logits, partial(gumbel_sample, temperature = temperature))
-            sampled = stack(sampled, dim = -1)
+        dist = MultiCategorical(
+            logits = discrete_logits,
+            use_parallel_multi_discrete = self.use_parallel_multi_discrete
+        )
+
+        sampled = dist.sample(temperature = temperature, eps = self.eps)
 
         if not is_list_tuple and self.auto_squeeze_single_output:
             sampled = rearrange(sampled, '... 1 -> ...')
@@ -739,53 +891,13 @@ class Readout(Base):
         discrete_logits:  Tensor | list[Tensor] | tuple[Tensor, ...], 
         sampled,
     ):
-        is_list_tuple = isinstance(discrete_logits, (list, tuple))
+        dist = MultiCategorical(
+            logits = discrete_logits,
+            use_parallel_multi_discrete = self.use_parallel_multi_discrete,
+            ignore_index = self.ignore_index
+        )
 
-        if not is_list_tuple:
-            need_unsqueeze = sampled.ndim == (discrete_logits.ndim - 1)
-
-            if need_unsqueeze and self.auto_squeeze_single_output:
-                sampled = rearrange(sampled, '... -> ... 1')
-
-            log_prob = discrete_logits.gather(-1, sampled)
-
-            if need_unsqueeze and self.auto_squeeze_single_output:
-                log_prob = rearrange(log_prob, '... 1 -> ...')
-
-            return log_prob
-
-        assert len(discrete_logits) > 0, 'empty discrete logits'
-
-        lens = tensor([d.shape[-1] for d in discrete_logits], device = first(discrete_logits).device)
-        offsets = exclusive_cumsum(lens)
-
-        indices = sampled + offsets
-
-        # handle log softmax
-
-        if self.use_parallel_multi_discrete:
-            discrete_logits, lens = cat_with_lens(discrete_logits)
-            log_softmaxed = log(segmented_softmax(discrete_logits, lens))
-        else:
-            log_softmaxed = [logit.log_softmax(dim = -1) for logit in discrete_logits]
-            log_softmaxed = cat(log_softmaxed, dim = -1)
-
-        # handle ignore index
-
-        has_ignore_index = exists(self.ignore_index)
-
-        if has_ignore_index:
-             ignore_mask = sampled == self.ignore_index
-             indices = indices.masked_fill(ignore_mask, 0)
-
-        # gather log probs
-
-        log_probs = log_softmaxed.gather(-1, indices)
-
-        if has_ignore_index:
-            log_probs = log_probs.masked_fill(ignore_mask, 0.)
-
-        return log_probs
+        return dist.log_prob(sampled)
 
     def log_prob_continuous(
         self,
@@ -847,26 +959,12 @@ class Readout(Base):
         self,
         discrete_logits:  Tensor | list[Tensor] | tuple[Tensor, ...]
     ):
-        is_list_tuple = isinstance(discrete_logits, (list, tuple))
+        dist = MultiCategorical(
+            logits = discrete_logits,
+            use_parallel_multi_discrete = self.use_parallel_multi_discrete
+        )
 
-        if not is_list_tuple:
-            return calc_entropy(discrete_logits)
-
-        assert len(discrete_logits) > 0, 'empty discrete logits'
-
-        if self.use_parallel_multi_discrete:
-            discrete_logits, lens = cat_with_lens(discrete_logits)
-            probs = segmented_softmax(discrete_logits, lens)
-
-            neg_prob_log_prob = -probs * log(probs)
-            neg_prob_log_prob = rearrange(neg_prob_log_prob, '... l -> l ...')
-
-            entropies = torch.segment_reduce(neg_prob_log_prob, 'sum', lengths = lens)
-        else:
-            entropies = [calc_entropy(logit) for logit in discrete_logits]
-
-        entropies = rearrange(entropies, 'nd ... -> ... nd')
-        return entropies
+        return dist.entropy()
 
     def entropy_continuous(
         self,
@@ -1117,44 +1215,24 @@ class Readout(Base):
         discrete_logits_true: Tensor | list[Tensor] | tuple[Tensor, ...],
         discrete_logits_pred: Tensor | list[Tensor] | tuple[Tensor, ...]
     ):
+        dist_true = MultiCategorical(
+            logits = discrete_logits_true,
+            use_parallel_multi_discrete = self.use_parallel_multi_discrete
+        )
+
+        dist_pred = MultiCategorical(
+            logits = discrete_logits_pred,
+            use_parallel_multi_discrete = self.use_parallel_multi_discrete
+        )
+
+        kl_divs = dist_true.kl_div(dist_pred)
+
+        # handle single output auto squeeze logic if needed, although MultiCategorical handles single logic internally
+        # we need to respect the Readout auto_squeeze_single_output logic if passing single tensor
+
         is_list_tuple = isinstance(discrete_logits_true, (list, tuple))
-
-        if not is_list_tuple:
-            discrete_logits_true = (discrete_logits_true,)
-            discrete_logits_pred = (discrete_logits_pred,)
-
-            discrete_logits_pred = (discrete_logits_pred,)
-
-        assert len(discrete_logits_true) > 0, 'empty logits'
-        assert len(discrete_logits_true) == len(discrete_logits_pred), f'logits length mismatch: true {len(discrete_logits_true)} vs pred {len(discrete_logits_pred)}'
-
-        if self.use_parallel_multi_discrete:
-            discrete_logits_true, lens = cat_with_lens(discrete_logits_true)
-            discrete_logits_pred, _ = cat_with_lens(discrete_logits_pred)
-
-            probs_true = segmented_softmax(discrete_logits_true, lens)
-            probs_pred = segmented_softmax(discrete_logits_pred, lens)
-
-            kl = probs_true * (log(probs_true) - log(probs_pred))
-            kl = rearrange(kl, '... l -> l ...')
-
-            kl_divs = torch.segment_reduce(kl, 'sum', lengths = lens)
-            kl_divs = rearrange(kl_divs, 'nd ... -> ... nd')
-        else:
-            kl_divs = []
-
-            for logits_true, logits_pred in zip(discrete_logits_true, discrete_logits_pred):
-                probs_true = logits_true.softmax(dim = -1)
-                log_probs_true = logits_true.log_softmax(dim = -1)
-                log_probs_pred = logits_pred.log_softmax(dim = -1)
-
-                kl = F.kl_div(log_probs_pred, log_probs_true, reduction = 'none', log_target = True)
-                kl_divs.append(kl.sum(dim = -1))
-
-            kl_divs = stack(kl_divs, dim = -1)
-
-        if not is_list_tuple and self.auto_squeeze_single_output:
-            kl_divs = rearrange(kl_divs, '... 1 -> ...')
+        if not is_list_tuple and self.auto_squeeze_single_output and kl_divs.shape[-1] == 1:
+             kl_divs = rearrange(kl_divs, '... 1 -> ...')
 
         return kl_divs
 
