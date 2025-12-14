@@ -5,6 +5,7 @@ param = pytest.mark.parametrize
 
 import torch
 from x_transformers import Decoder
+from einops import rearrange
 
 # tests
 
@@ -476,3 +477,87 @@ def test_concat_discrete_continuous():
 
     assert tokens.shape == (2, 64, 2 + 1, 512)
 
+
+def test_auto_squeeze_single_output():
+
+    embed, readout = EmbedAndReadout(
+        dim = 512,
+        num_discrete = 100,
+        return_only_discrete_or_continuous = True, # to isolate discrete
+        readout_kwargs = dict(
+            auto_squeeze_single_output = False
+        )
+    )
+
+    embed_squeezed, readout_squeezed = EmbedAndReadout(
+        dim = 512,
+        num_discrete = 100,
+        return_only_discrete_or_continuous = True,
+        readout_kwargs = dict(
+            auto_squeeze_single_output = True 
+        )
+    )
+
+    discrete_input = torch.randint(0, 100, (2, 64))
+
+    tokens = embed(discrete_input)
+
+    logits_unsqueezed = readout(tokens)
+
+    assert isinstance(logits_unsqueezed, (list, tuple))
+    assert len(logits_unsqueezed) == 1
+    assert logits_unsqueezed[0].shape == (2, 64, 100)
+
+    sampled_unsqueezed = readout.sample(logits_unsqueezed)
+
+    assert sampled_unsqueezed.shape == (2, 64, 1)
+
+    log_probs_unsqueezed = readout.log_prob(logits_unsqueezed, sampled_unsqueezed)
+
+    assert log_probs_unsqueezed.shape == (2, 64, 1)
+
+    entropy_unsqueezed = readout.entropy(logits_unsqueezed)
+
+    assert entropy_unsqueezed.shape == (2, 64, 1)
+
+    logits_squeezed = readout_squeezed(tokens)
+    assert isinstance(logits_squeezed, torch.Tensor)
+    assert logits_squeezed.shape == (2, 64, 100)
+
+    sampled_squeezed = readout_squeezed.sample(logits_squeezed)
+    assert sampled_squeezed.shape == (2, 64)
+
+    log_probs_squeezed = readout_squeezed.log_prob(logits_squeezed, sampled_squeezed)
+    assert log_probs_squeezed.shape == (2, 64)
+
+    entropy_squeezed = readout_squeezed.entropy(logits_squeezed)
+    assert entropy_squeezed.shape == (2, 64)
+
+    embed_continuous, readout_continuous = EmbedAndReadout(
+        dim = 512,
+        num_continuous = 1, # single continuous dim
+        readout_kwargs = dict(
+            auto_squeeze_single_output = False,
+            continuous_log_var_embed = True
+        )
+    )
+
+    continuous_input = torch.randn(2, 64, 1)
+    tokens_continuous = embed_continuous(continuous_input)
+    dist_continuous = readout_continuous(tokens_continuous) # (B, T, 1, 2)
+    assert dist_continuous.shape == (2, 64, 1, 2)
+
+    sampled_continuous = readout_continuous.sample(dist_continuous)
+    assert sampled_continuous.shape == (2, 64, 1)
+
+    embed_continuous_sq, readout_continuous_sq = EmbedAndReadout(
+        dim = 512,
+        num_continuous = 1,
+        readout_kwargs = dict(
+            auto_squeeze_single_output = True,
+            continuous_log_var_embed = True
+        )
+    )
+
+    dist_continuous_sq = readout_continuous_sq(tokens_continuous)
+    assert dist_continuous_sq.shape == (2, 64, 1, 2)

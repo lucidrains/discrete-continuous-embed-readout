@@ -622,9 +622,11 @@ class Readout(Base):
         self,
         *args,
         return_one_discrete_logits = None,
+        auto_squeeze_single_output = True,
         **kwargs
     ):
         super().__init__(*args, **kwargs)
+        self.auto_squeeze_single_output = auto_squeeze_single_output
         self.return_one_discrete_logits = default(return_one_discrete_logits, self.num_discrete_sets == 1)
         assert not (self.return_one_discrete_logits and self.num_discrete_sets > 1), 'cannot return only one discrete logit group if greater than one group'
 
@@ -650,7 +652,7 @@ class Readout(Base):
             sampled = tree_map_tensor(discrete_logits, partial(gumbel_sample, temperature = temperature))
             sampled = stack(sampled, dim = -1)
 
-        if not is_list_tuple:
+        if not is_list_tuple and self.auto_squeeze_single_output:
             sampled = rearrange(sampled, '... 1 -> ...')
 
         return sampled
@@ -700,12 +702,12 @@ class Readout(Base):
         if not is_list_tuple:
             need_unsqueeze = sampled.ndim == (discrete_logits.ndim - 1)
 
-            if need_unsqueeze:
+            if need_unsqueeze and self.auto_squeeze_single_output:
                 sampled = rearrange(sampled, '... -> ... 1')
 
             log_prob = discrete_logits.gather(-1, sampled)
 
-            if need_unsqueeze:
+            if need_unsqueeze and self.auto_squeeze_single_output:
                 log_prob = rearrange(log_prob, '... 1 -> ...')
 
             return log_prob
@@ -883,7 +885,7 @@ class Readout(Base):
         # maybe only return distribution parameters
 
         if not return_loss:
-            if self.return_one_discrete_logits and selector.has_discrete and selector.discrete_selector.num_discrete_sets == 1 and exists(discrete_logits_for_groups):
+            if self.return_one_discrete_logits and selector.has_discrete and selector.discrete_selector.num_discrete_sets == 1 and exists(discrete_logits_for_groups) and self.auto_squeeze_single_output:
                 discrete_logits_for_groups = first(discrete_logits_for_groups)
 
             if selector.one_of_discrete_or_continuous and return_only_discrete_or_continuous:
@@ -906,7 +908,7 @@ class Readout(Base):
 
         # take care of only one discrete logit group, as in language modeling
 
-        if self.return_one_discrete_logits and selector.has_discrete and selector.discrete_selector.num_discrete_sets == 1:
+        if self.return_one_discrete_logits and selector.has_discrete and selector.discrete_selector.num_discrete_sets == 1 and self.auto_squeeze_single_output:
             discrete_targets = rearrange(discrete_targets, '... -> ... 1')
 
         # handle basic losses
@@ -984,7 +986,7 @@ class Readout(Base):
 
             kl_divs = stack(kl_divs, dim = -1)
 
-        if not is_list_tuple:
+        if not is_list_tuple and self.auto_squeeze_single_output:
             kl_divs = rearrange(kl_divs, '... 1 -> ...')
 
         return kl_divs
