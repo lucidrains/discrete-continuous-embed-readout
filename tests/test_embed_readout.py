@@ -613,3 +613,82 @@ def test_readout_unreduced_loss():
 
     assert torch.allclose(unreduced_masked_loss.discrete, discrete_loss_masked)
     assert torch.allclose(unreduced_masked_loss.continuous, continuous_loss_masked)
+
+def test_runtime_selector_config():
+    # 3 discrete, 1 continuous
+    dim = 32
+    num_discrete = 10
+    num_continuous = 2
+
+    embed = Embed(
+        dim = dim,
+        num_discrete = num_discrete,
+        num_continuous = num_continuous
+    )
+
+    readout = Readout(
+        dim = dim,
+        num_discrete = num_discrete,
+        num_continuous = num_continuous
+    )
+
+    # Runtime config: use only first 5 discrete indices and first 1 continuous
+    discrete_config = [[0, 1, 2, 3, 4]]
+    continuous_config = [0]
+    selector_config = (discrete_config, continuous_config)
+
+    batch_size = 4
+
+    # Test Embed with runtime config
+
+    discrete_inp = torch.randint(0, 5, (batch_size,))
+    continuous_inp = torch.randn(batch_size, 1)
+
+    embedded = embed(
+        (discrete_inp, continuous_inp),
+        selector_config = selector_config
+    )
+
+    assert embedded.shape == (batch_size, dim) # Summed due to default sum_discrete_continuous=True
+
+    # Test Readout with runtime config
+
+    logits = readout(
+        embedded,
+        selector_config = selector_config,
+        return_only_discrete_or_continuous = False
+    )
+
+    discrete_logits, continuous_params = logits
+
+    assert torch.is_tensor(discrete_logits)
+    assert discrete_logits.shape == (batch_size, 5)
+
+    assert continuous_params.shape == (batch_size, 1, 2)
+
+    # Test sample
+    sampled = readout.sample(logits, selector_config = selector_config)
+
+    # Test log_prob
+
+    log_probs = readout.log_prob(logits, sampled, selector_config = selector_config)
+
+    assert isinstance(log_probs, tuple) # DiscreteContinuous
+    assert log_probs.discrete.shape == (batch_size,)
+    assert log_probs.continuous.shape == (batch_size, 1)
+
+    # Test entropy
+    entropy = readout.entropy(logits, selector_config = selector_config)
+
+    # Test calculate_loss
+
+    discrete_targets = torch.randint(0, 5, (batch_size,))
+    continuous_targets = torch.randn(batch_size, 1)
+
+    loss = readout.calculate_loss(
+        logits,
+        (discrete_targets, continuous_targets),
+        selector_config = selector_config
+    )
+
+    assert isinstance(loss, tuple) # DiscreteContinuous

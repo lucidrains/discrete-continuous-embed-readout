@@ -473,15 +473,15 @@ class Base(Module):
 
             selectors_configs = [(default_discrete_indices, default_continuous_indices)]
 
+        self.continuous_log_var_embed = continuous_log_var_embed
+        self.num_continuous = num_continuous
+        self.embedding_offset = total_discrete
+        self.continuous_mean_std = continuous_mean_std
+
         for discrete_indices, continuous_indices in selectors_configs:
-            self.selectors.append(DiscreteContinuousSelector(
-                continuous_log_var_embed = continuous_log_var_embed,
-                continuous_mean_std = continuous_mean_std,
-                embeddings = self.embeddings,
-                discrete_set_indices = discrete_indices,
-                continuous_indices = continuous_indices,
-                num_continuous = num_continuous,
-                embedding_offset = total_discrete
+            self.selectors.append(self.create_discrete_continuous_selector(
+                discrete_indices = discrete_indices,
+                continuous_indices = continuous_indices
             ))
 
         self.num_discrete_sets = len(num_discrete)
@@ -494,7 +494,52 @@ class Base(Module):
 
         self.eps = eps
 
-    def get_selector(self, selector_index = None):
+    def create_discrete_continuous_selector(
+        self,
+        discrete_indices = None,
+        continuous_indices = None
+    ):
+        return DiscreteContinuousSelector(
+            continuous_log_var_embed = self.continuous_log_var_embed,
+            continuous_mean_std = self.continuous_mean_std,
+            embeddings = self.embeddings,
+            discrete_set_indices = discrete_indices,
+            continuous_indices = continuous_indices,
+            num_continuous = self.num_continuous,
+            embedding_offset = self.embedding_offset
+        )
+
+    def _process_selector_config(self, selector):
+        discrete_indices = None
+        continuous_indices = None
+
+        if is_bearable(selector, tuple[DiscreteConfig, ContinuousConfig]):
+            discrete_indices, continuous_indices = selector
+        elif is_bearable(selector, DiscreteConfig):
+            discrete_indices = selector
+        elif is_bearable(selector, ContinuousConfig):
+            continuous_indices = selector
+        else:
+            raise ValueError(f'invalid selector config {selector}')
+
+        if exists(discrete_indices):
+            for group in discrete_indices:
+                assert len(group) > 0
+
+        if exists(continuous_indices):
+            if len(continuous_indices) > 0:
+                pass
+
+        assert not exists(discrete_indices) or all([is_unique(indices) for indices in discrete_indices])
+        assert not exists(continuous_indices) or is_unique(continuous_indices)
+
+        return discrete_indices, continuous_indices
+
+    def get_selector(self, selector_index = None, selector_config = None):
+        if exists(selector_config):
+            discrete_indices, continuous_indices = self._process_selector_config(selector_config)
+            return self.create_discrete_continuous_selector(discrete_indices = discrete_indices, continuous_indices = continuous_indices)
+
         if len(self.selectors) == 1:
             return self.selectors[0]
 
@@ -524,14 +569,14 @@ class Embed(Base):
         normalize_continuous = None,
         return_only_discrete_or_continuous = None,
         selector_index = None,
+        selector_config = None,
         concat_discrete_continuous = False
     ):
-        normalize_continuous = default(normalize_continuous, self.can_norm_continuous)
         return_only_discrete_or_continuous = default(return_only_discrete_or_continuous, self.return_only_discrete_or_continuous)
 
         assert not (normalize_continuous and not self.can_norm_continuous)
 
-        selector = self.get_selector(selector_index)
+        selector = self.get_selector(selector_index, selector_config = selector_config)
 
         # handle inferring it is either discrete or continuous
 
@@ -680,9 +725,10 @@ class Readout(Base):
     def sample(
         self,
         dist,
-        selector_index = None
+        selector_index = None,
+        selector_config = None
     ):
-        selector = self.get_selector(selector_index)
+        selector = self.get_selector(selector_index, selector_config = selector_config)
 
         if selector.one_of_discrete_or_continuous:
             if selector.has_discrete:
@@ -783,9 +829,10 @@ class Readout(Base):
         dist,
         sampled,
         selector_index = None,
+        selector_config = None,
         concat = False
     ):
-        selector = self.get_selector(selector_index)
+        selector = self.get_selector(selector_index, selector_config = selector_config)
 
         output = None
 
@@ -842,9 +889,10 @@ class Readout(Base):
         self,
         dist,
         selector_index = None,
+        selector_config = None,
         concat = False
     ):
-        selector = self.get_selector(selector_index)
+        selector = self.get_selector(selector_index, selector_config = selector_config)
 
         output = None
 
@@ -866,10 +914,11 @@ class Readout(Base):
         logits,
         targets,
         selector_index = 0,
+        selector_config = None,
         mask = None,
         return_unreduced_loss = False
     ):
-        selector = self.get_selector(selector_index)
+        selector = self.get_selector(selector_index, selector_config=selector_config)
 
         # handle destructuring of logits
 
@@ -997,13 +1046,14 @@ class Readout(Base):
         return_unreduced_loss = False,
         loss_mask = None,
         return_only_discrete_or_continuous = None,
-        selector_index = None
+        selector_index = None,
+        selector_config = None
     ):
         return_only_discrete_or_continuous = default(return_only_discrete_or_continuous, self.return_only_discrete_or_continuous)
 
         assert xnor(exists(targets), return_loss), '`target` must be passed in if `return_loss` set to True and vice versa'
 
-        selector = self.get_selector(selector_index)
+        selector = self.get_selector(selector_index, selector_config = selector_config)
 
         # discrete unembedding
 
@@ -1055,6 +1105,7 @@ class Readout(Base):
             logits,
             targets,
             selector_index = selector_index,
+            selector_config = selector_config,
             mask = loss_mask,
             return_unreduced_loss = return_unreduced_loss
         )
@@ -1121,9 +1172,10 @@ class Readout(Base):
         self,
         dist_true,
         dist_pred,
-        selector_index = None
+        selector_index = None,
+        selector_config = None
     ):
-        selector = self.get_selector(selector_index)
+        selector = self.get_selector(selector_index, selector_config = selector_config)
 
         if selector.one_of_discrete_or_continuous:
             if selector.has_discrete:
