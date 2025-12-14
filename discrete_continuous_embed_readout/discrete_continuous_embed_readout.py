@@ -156,7 +156,7 @@ def gumbel_sample_multi_categorical(
     eps = 1e-20
 ):
     is_greedy = temperature <= 0.
-    assert len(dists) > 0
+    assert len(dists) > 0, 'empty distributions'
     one_dist = first(dists)
 
     dists, lens = cat_with_lens(dists)
@@ -242,7 +242,10 @@ class ContinuousSelector(Module):
         # embedding is [discrete] [continuous mean] [?continuous log var]
 
         continuous_indices = tensor(continuous_indices)
-        assert continuous_indices.unique().numel() == continuous_indices.numel()
+        continuous_indices = tensor(continuous_indices)
+        assert continuous_indices.unique().numel() == continuous_indices.numel(), f'continuous indices must be unique, received {continuous_indices.tolist()}'
+
+        continuous_log_var_indices = None
 
         continuous_log_var_indices = None
         if continuous_log_var_embed:
@@ -333,8 +336,9 @@ class DiscreteContinuousSelector(Module):
         inp
     ):
         if is_tensor(inp):
-            assert self.one_of_discrete_or_continuous
+            assert self.one_of_discrete_or_continuous, 'input validation only supported for single modality selectors'
             dtype = inp.dtype
+
 
             if dtype in (torch.int, torch.long) and self.has_discrete:
                 inp = (inp, None)
@@ -391,7 +395,7 @@ class Base(Module):
             max_discrete_index = -1
             max_continuous_index = -1
 
-            assert len(selectors) > 0
+            assert len(selectors) > 0, 'empty selectors'
 
             # normalize selectors
 
@@ -399,17 +403,7 @@ class Base(Module):
 
             for selector in selectors:
 
-                discrete_indices = None
-                continuous_indices = None
-
-                if is_bearable(selector, tuple[DiscreteConfig, ContinuousConfig]):
-                    discrete_indices, continuous_indices = selector
-                elif is_bearable(selector, DiscreteConfig):
-                    discrete_indices = selector
-                elif is_bearable(selector, ContinuousConfig):
-                    continuous_indices = selector
-                else:
-                    raise ValueError(f'invalid selector config {selector}')
+                discrete_indices, continuous_indices = self._process_selector_config(selector)
 
                 if exists(discrete_indices):
                     for group in discrete_indices:
@@ -420,16 +414,13 @@ class Base(Module):
                     if len(continuous_indices) > 0:
                         max_continuous_index = max(max_continuous_index, max(continuous_indices))
 
-                assert not exists(discrete_indices) or all([is_unique(indices) for indices in discrete_indices])
-                assert not exists(continuous_indices) or is_unique(continuous_indices)
-
                 selectors_configs.append((discrete_indices, continuous_indices))
 
             if max_discrete_index >= 0:
-                assert max_discrete_index < total_discrete
+                assert max_discrete_index < total_discrete, f'discrete index out of bounds: max index {max_discrete_index} >= total discrete embeddings {total_discrete}'
 
             if max_continuous_index >= 0:
-                assert max_continuous_index < num_continuous
+                assert max_continuous_index < num_continuous, f'continuous index out of bounds: max index {max_continuous_index} >= num continuous {num_continuous}'
 
         # infer has discrete or continuous
 
@@ -452,9 +443,9 @@ class Base(Module):
         self.can_norm_continuous = exists(continuous_mean_std)
 
         if self.can_norm_continuous:
-            assert self.has_continuous
-            assert continuous_mean_std.shape == (num_continuous, 2)
-            assert (continuous_mean_std[..., -1] > 0).all()
+            assert self.has_continuous, 'continuous mean std given but no continuous dims'
+            assert continuous_mean_std.shape == (num_continuous, 2), f'continuous mean std shape mismatch, expected ({num_continuous}, 2) but got {continuous_mean_std.shape}'
+            assert (continuous_mean_std[..., -1] > 0).all(), 'std must be positive'
 
             continuous_mean_std = BufferModule(continuous_mean_std)
 
@@ -478,7 +469,9 @@ class Base(Module):
         self.embedding_offset = total_discrete
         self.continuous_mean_std = continuous_mean_std
 
-        for discrete_indices, continuous_indices in selectors_configs:
+        for selector_config in selectors_configs:
+            discrete_indices, continuous_indices = selector_config
+
             self.selectors.append(self.create_discrete_continuous_selector(
                 discrete_indices = discrete_indices,
                 continuous_indices = continuous_indices
@@ -509,7 +502,7 @@ class Base(Module):
             embedding_offset = self.embedding_offset
         )
 
-    def _process_selector_config(self, selector):
+    def _process_selector_config(self, selector: SelectorConfig):
         discrete_indices = None
         continuous_indices = None
 
@@ -524,7 +517,7 @@ class Base(Module):
 
         if exists(discrete_indices):
             for group in discrete_indices:
-                assert len(group) > 0
+                assert len(group) > 0, 'empty discrete group'
 
         if exists(continuous_indices):
             if len(continuous_indices) > 0:
@@ -535,7 +528,11 @@ class Base(Module):
 
         return discrete_indices, continuous_indices
 
-    def get_selector(self, selector_index = None, selector_config = None):
+    def get_selector(
+        self,
+        selector_index: int | None = None,
+        selector_config: SelectorConfig | None = None
+    ):
         if exists(selector_config):
             discrete_indices, continuous_indices = self._process_selector_config(selector_config)
             return self.create_discrete_continuous_selector(discrete_indices = discrete_indices, continuous_indices = continuous_indices)
@@ -543,7 +540,7 @@ class Base(Module):
         if len(self.selectors) == 1:
             return self.selectors[0]
 
-        assert exists(selector_index)
+        assert exists(selector_index), 'selector index required'
         return self.selectors[selector_index]
 
 # embed and readout
@@ -568,13 +565,13 @@ class Embed(Base):
         sum_discrete_continuous = True,
         normalize_continuous = None,
         return_only_discrete_or_continuous = None,
-        selector_index = None,
-        selector_config = None,
+        selector_index: int | None = None,
+        selector_config: SelectorConfig | None = None,
         concat_discrete_continuous = False
     ):
         return_only_discrete_or_continuous = default(return_only_discrete_or_continuous, self.return_only_discrete_or_continuous)
 
-        assert not (normalize_continuous and not self.can_norm_continuous)
+        assert not (normalize_continuous and not self.can_norm_continuous), 'cannot normalize continuous without mean/std'
 
         selector = self.get_selector(selector_index, selector_config = selector_config)
 
@@ -710,8 +707,8 @@ class Readout(Base):
         temperature = 1.,
         selector = None
     ):
-        assert exists(selector)
-        assert selector.continuous_log_var_embed
+        assert exists(selector), 'selector required for continuous sampling'
+        assert selector.continuous_log_var_embed, 'continuous log var embed required'
 
         sampled = gaussian_sample(continuous_dist_params, temperature)
 
@@ -725,8 +722,8 @@ class Readout(Base):
     def sample(
         self,
         dist,
-        selector_index = None,
-        selector_config = None
+        selector_index: int | None = None,
+        selector_config: SelectorConfig | None = None
     ):
         selector = self.get_selector(selector_index, selector_config = selector_config)
 
@@ -760,7 +757,9 @@ class Readout(Base):
 
             return log_prob
 
-        assert len(discrete_logits) > 0
+            return log_prob
+
+        assert len(discrete_logits) > 0, 'empty discrete logits'
 
         lens = tensor([d.shape[-1] for d in discrete_logits], device = first(discrete_logits).device)
         offsets = exclusive_cumsum(lens)
@@ -821,15 +820,14 @@ class Readout(Base):
         # if any tensor is (batch, seq) - assume it is single discrete and unsqueeze (so it becomes (batch, seq, 1))
 
         output = [rearrange(t, '... -> ... 1') if (t.ndim == 2 and self.return_one_discrete_logits) else t for t in output]
-
         return cat(output, dim = -1)
 
     def log_prob(
         self,
-        dist,
+        logits,
         sampled,
-        selector_index = None,
-        selector_config = None,
+        selector_index: int | None = None,
+        selector_config: SelectorConfig | None = None,
         concat = False
     ):
         selector = self.get_selector(selector_index, selector_config = selector_config)
@@ -838,13 +836,13 @@ class Readout(Base):
 
         if selector.one_of_discrete_or_continuous:
             if selector.has_discrete:
-                output = self.log_prob_discrete(dist, sampled)
+                output = self.log_prob_discrete(logits, sampled)
 
             elif selector.has_continuous:
-                output = self.log_prob_continuous(dist, sampled, selector = selector)
+                output = self.log_prob_continuous(logits, sampled, selector = selector)
 
         else:
-            discrete, continuous = dist
+            discrete, continuous = logits
             discrete_sampled, continuous_sampled = sampled
             output = DiscreteContinuous(self.log_prob_discrete(discrete, discrete_sampled), self.log_prob_continuous(continuous, continuous_sampled, selector = selector))
 
@@ -859,7 +857,7 @@ class Readout(Base):
         if not is_list_tuple:
             return calc_entropy(discrete_logits)
 
-        assert len(discrete_logits) > 0
+        assert len(discrete_logits) > 0, 'empty discrete logits'
 
         if self.use_parallel_multi_discrete:
             discrete_logits, lens = cat_with_lens(discrete_logits)
@@ -880,16 +878,16 @@ class Readout(Base):
         continuous_dist_params,
         selector = None
     ):
-        assert exists(selector)
-        assert selector.continuous_log_var_embed
+        assert exists(selector), 'selector required'
+        assert selector.continuous_log_var_embed, 'continuous log var embed required'
         dist = mean_log_var_to_normal_dist(continuous_dist_params)
         return dist.entropy()
 
     def entropy(
         self,
-        dist,
-        selector_index = None,
-        selector_config = None,
+        logits,
+        selector_index: int | None = None,
+        selector_config: SelectorConfig | None = None,
         concat = False
     ):
         selector = self.get_selector(selector_index, selector_config = selector_config)
@@ -898,13 +896,13 @@ class Readout(Base):
 
         if selector.one_of_discrete_or_continuous:
             if selector.has_discrete:
-                output = self.entropy_discrete(dist)
+                output = self.entropy_discrete(logits)
 
             elif selector.has_continuous:
-                output = self.entropy_continuous(dist, selector = selector)
+                output = self.entropy_continuous(logits, selector = selector)
 
         else:
-            discrete, continuous = dist
+            discrete, continuous = logits
             output = DiscreteContinuous(self.entropy_discrete(discrete), self.entropy_continuous(continuous, selector = selector))
 
         return self.maybe_concat(output, concat = concat)
@@ -913,8 +911,8 @@ class Readout(Base):
         self,
         logits,
         targets,
-        selector_index = 0,
-        selector_config = None,
+        selector_index: int | None = None,
+        selector_config: SelectorConfig | None = None,
         mask = None,
         return_unreduced_loss = False
     ):
@@ -925,18 +923,27 @@ class Readout(Base):
         discrete_logits = logits
         continuous_dist_params = logits
 
+        discrete_logits = logits
+        continuous_dist_params = logits
+
         if selector.has_discrete and selector.has_continuous:
-            assert isinstance(logits, (tuple, list, DiscreteContinuous)) and len(logits) == 2
+            assert isinstance(logits, (tuple, list, DiscreteContinuous)) and len(logits) == 2, f'logits must be tuple of (discrete, continuous) when both are present, received {type(logits)}'
             discrete_logits, continuous_dist_params = logits
+
+        # handle destructuring of targets
 
         # handle destructuring of targets
 
         discrete_targets = targets
         continuous_targets = targets
 
+        discrete_targets = targets
+        continuous_targets = targets
+
         if selector.has_discrete and selector.has_continuous:
-            assert isinstance(targets, (tuple, list, DiscreteContinuous)) and len(targets) == 2
+            assert isinstance(targets, (tuple, list, DiscreteContinuous)) and len(targets) == 2, f'targets must be tuple of (discrete, continuous) when both are present, received {type(targets)}'
             discrete_targets, continuous_targets = targets
+
 
         # take care of only one discrete logit group, as in language modeling
 
@@ -1121,8 +1128,10 @@ class Readout(Base):
             discrete_logits_true = (discrete_logits_true,)
             discrete_logits_pred = (discrete_logits_pred,)
 
-        assert len(discrete_logits_true) > 0
-        assert len(discrete_logits_true) == len(discrete_logits_pred)
+            discrete_logits_pred = (discrete_logits_pred,)
+
+        assert len(discrete_logits_true) > 0, 'empty logits'
+        assert len(discrete_logits_true) == len(discrete_logits_pred), f'logits length mismatch: true {len(discrete_logits_true)} vs pred {len(discrete_logits_pred)}'
 
         if self.use_parallel_multi_discrete:
             discrete_logits_true, lens = cat_with_lens(discrete_logits_true)

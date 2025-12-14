@@ -632,7 +632,6 @@ def test_runtime_selector_config():
         num_continuous = num_continuous
     )
 
-    # Runtime config: use only first 5 discrete indices and first 1 continuous
     discrete_config = [[0, 1, 2, 3, 4]]
     continuous_config = [0]
     selector_config = (discrete_config, continuous_config)
@@ -649,9 +648,7 @@ def test_runtime_selector_config():
         selector_config = selector_config
     )
 
-    assert embedded.shape == (batch_size, dim) # Summed due to default sum_discrete_continuous=True
-
-    # Test Readout with runtime config
+    assert embedded.shape == (batch_size, dim)
 
     logits = readout(
         embedded,
@@ -666,10 +663,7 @@ def test_runtime_selector_config():
 
     assert continuous_params.shape == (batch_size, 1, 2)
 
-    # Test sample
     sampled = readout.sample(logits, selector_config = selector_config)
-
-    # Test log_prob
 
     log_probs = readout.log_prob(logits, sampled, selector_config = selector_config)
 
@@ -685,6 +679,7 @@ def test_runtime_selector_config():
     discrete_targets = torch.randint(0, 5, (batch_size,))
     continuous_targets = torch.randn(batch_size, 1)
 
+
     loss = readout.calculate_loss(
         logits,
         (discrete_targets, continuous_targets),
@@ -692,3 +687,85 @@ def test_runtime_selector_config():
     )
 
     assert isinstance(loss, tuple) # DiscreteContinuous
+
+def test_lone_discrete_config():
+    dim = 32
+    num_discrete = 10
+    num_continuous = 2
+
+    embed = Embed(
+        dim = dim,
+        num_discrete = num_discrete,
+        num_continuous = num_continuous
+    )
+
+    readout = Readout(
+        dim = dim,
+        num_discrete = num_discrete,
+        num_continuous = num_continuous
+    )
+
+    # Test passing lone discrete config as list[list[int]]
+    discrete_config = [[0, 1, 2]]
+
+    batch_size = 4
+    discrete_inp = torch.randint(0, 3, (batch_size,))
+
+    # Embed
+    embedded = embed(
+        discrete_inp,
+        selector_config = discrete_config
+    )
+    assert embedded.shape == (batch_size, dim)
+
+    # Readout
+    logits = readout(
+        embedded,
+        selector_config = discrete_config
+    )
+
+    assert torch.is_tensor(logits)
+    assert logits.shape == (batch_size, 3)
+
+    sampled = readout.sample(logits, selector_config = discrete_config)
+    assert sampled.shape == (batch_size,)
+
+def test_lone_continuous_config():
+    dim = 32
+    num_discrete = 10
+    num_continuous = 2
+
+    embed = Embed(
+        dim = dim,
+        num_discrete = num_discrete,
+        num_continuous = num_continuous
+    )
+
+    readout = Readout(
+        dim = dim,
+        num_discrete = num_discrete,
+        num_continuous = num_continuous,
+        continuous_log_var_embed = True
+    )
+
+    continuous_config = [0, 1]
+
+    batch_size = 4
+    continuous_inp = torch.randn(batch_size, 2)
+
+    embedded = embed(
+        continuous_inp,
+        selector_config = continuous_config
+    )
+    assert embedded.shape == (batch_size, dim)
+
+    dist = readout(
+        embedded,
+        selector_config = continuous_config
+    )
+
+    assert torch.is_tensor(dist)
+    assert dist.shape == (batch_size, 2, 2)
+
+    sampled = readout.sample(dist, selector_config = continuous_config)
+    assert sampled.shape == (batch_size, 2)
