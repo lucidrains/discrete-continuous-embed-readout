@@ -44,6 +44,9 @@ def identity(t):
 def first(arr):
     return arr[0]
 
+def is_unique(arr):
+    return len(arr) == len(set(arr))
+
 def xnor(x, y):
     return x == y
 
@@ -416,6 +419,9 @@ class Base(Module):
                 if exists(continuous_indices):
                     if len(continuous_indices) > 0:
                         max_continuous_index = max(max_continuous_index, max(continuous_indices))
+
+                assert not exists(discrete_indices) or all([is_unique(indices) for indices in discrete_indices])
+                assert not exists(continuous_indices) or is_unique(continuous_indices)
 
                 selectors_configs.append((discrete_indices, continuous_indices))
 
