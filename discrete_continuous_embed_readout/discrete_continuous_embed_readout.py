@@ -41,6 +41,9 @@ def exists(v):
 def identity(t):
     return t
 
+def compact(arr):
+    return list(filter(exists, arr))
+
 def first(arr):
     return arr[0]
 
@@ -49,9 +52,6 @@ def is_unique(arr):
 
 def xnor(x, y):
     return x == y
-
-def compact(arr):
-    return [*filter(exists, arr)]
 
 def default(v, d):
     return v if exists(v) else d
@@ -335,20 +335,18 @@ class DiscreteContinuousSelector(Module):
         self,
         inp
     ):
-        if is_tensor(inp):
-            assert self.one_of_discrete_or_continuous, 'input validation only supported for single modality selectors'
-            dtype = inp.dtype
+        if not is_tensor(inp):
+            return inp
 
+        assert self.one_of_discrete_or_continuous, 'input validation only supported for single modality selectors'
+        dtype = inp.dtype
 
-            if dtype in (torch.int, torch.long) and self.has_discrete:
-                inp = (inp, None)
-            elif dtype == torch.float and self.has_continuous:
-                inp = (None, inp)
-            else:
-                raise ValueError('invalid tensor')
-
-        return inp
-
+        if dtype in (torch.int, torch.long) and self.has_discrete:
+            return (inp, None)
+        elif dtype == torch.float and self.has_continuous:
+            return (None, inp)
+        else:
+            raise ValueError('invalid tensor')
 
 # base
 
@@ -406,13 +404,10 @@ class Base(Module):
                 discrete_indices, continuous_indices = self._process_selector_config(selector)
 
                 if exists(discrete_indices):
-                    for group in discrete_indices:
-                        if len(group) > 0:
-                            max_discrete_index = max(max_discrete_index, max(group))
+                    max_discrete_index = max(max_discrete_index, max(flatten(discrete_indices)))
 
                 if exists(continuous_indices):
-                    if len(continuous_indices) > 0:
-                        max_continuous_index = max(max_continuous_index, max(continuous_indices))
+                    max_continuous_index = max(max_continuous_index, *continuous_indices)
 
                 selectors_configs.append((discrete_indices, continuous_indices))
 
@@ -472,10 +467,12 @@ class Base(Module):
         for selector_config in selectors_configs:
             discrete_indices, continuous_indices = selector_config
 
-            self.selectors.append(self.create_discrete_continuous_selector(
+            selector = self.create_discrete_continuous_selector(
                 discrete_indices = discrete_indices,
                 continuous_indices = continuous_indices
-            ))
+            )
+
+            self.selectors.append(selector)
 
         self.num_discrete_sets = len(num_discrete)
 
@@ -757,8 +754,6 @@ class Readout(Base):
 
             return log_prob
 
-            return log_prob
-
         assert len(discrete_logits) > 0, 'empty discrete logits'
 
         lens = tensor([d.shape[-1] for d in discrete_logits], device = first(discrete_logits).device)
@@ -775,8 +770,6 @@ class Readout(Base):
             log_softmaxed = [logit.log_softmax(dim = -1) for logit in discrete_logits]
             log_softmaxed = cat(log_softmaxed, dim = -1)
 
-        # gather log probs
-
         # handle ignore index
 
         has_ignore_index = exists(self.ignore_index)
@@ -784,6 +777,8 @@ class Readout(Base):
         if has_ignore_index:
              ignore_mask = sampled == self.ignore_index
              indices = indices.masked_fill(ignore_mask, 0)
+
+        # gather log probs
 
         log_probs = log_softmaxed.gather(-1, indices)
 
@@ -812,7 +807,7 @@ class Readout(Base):
             output = (output.discrete, output.continuous)
 
         output = cast_tuple(output)
-        output = [t for t in output if exists(t)]
+        output = compact(output)
 
         if len(output) == 0:
             return None
@@ -923,19 +918,11 @@ class Readout(Base):
         discrete_logits = logits
         continuous_dist_params = logits
 
-        discrete_logits = logits
-        continuous_dist_params = logits
-
         if selector.has_discrete and selector.has_continuous:
             assert isinstance(logits, (tuple, list, DiscreteContinuous)) and len(logits) == 2, f'logits must be tuple of (discrete, continuous) when both are present, received {type(logits)}'
             discrete_logits, continuous_dist_params = logits
 
         # handle destructuring of targets
-
-        # handle destructuring of targets
-
-        discrete_targets = targets
-        continuous_targets = targets
 
         discrete_targets = targets
         continuous_targets = targets
@@ -943,7 +930,6 @@ class Readout(Base):
         if selector.has_discrete and selector.has_continuous:
             assert isinstance(targets, (tuple, list, DiscreteContinuous)) and len(targets) == 2, f'targets must be tuple of (discrete, continuous) when both are present, received {type(targets)}'
             discrete_targets, continuous_targets = targets
-
 
         # take care of only one discrete logit group, as in language modeling
 
@@ -960,8 +946,17 @@ class Readout(Base):
                 discrete_losses = -log_probs
             else:
                 discrete_losses = []
+
                 for discrete_logit, one_target in zip(discrete_logits, discrete_targets.unbind(dim = -1)):
-                    discrete_losses.append(F.cross_entropy(rearrange(discrete_logit, 'b ... c -> b c ...'), one_target, reduction = 'none', ignore_index = self.ignore_index))
+
+                    discrete_loss = F.cross_entropy(
+                        rearrange(discrete_logit, 'b ... c -> b c ...'),
+                        one_target,
+                        reduction = 'none',
+                        ignore_index = self.ignore_index
+                    )
+
+                    discrete_losses.append(discrete_loss)
 
                 if len(discrete_losses) > 1:
                     discrete_losses = stack(discrete_losses, dim = -1)
