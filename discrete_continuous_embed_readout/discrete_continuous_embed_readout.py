@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 from typing import Callable
 from beartype import beartype
 from beartype.door import is_bearable
@@ -361,7 +362,7 @@ class DiscreteSelector(Module):
         indices
     ):
         if self.num_discrete_sets > 1:
-            assert indices.shape[-1] == self.num_discrete_sets, f'shape of input must end with {self.num_discrete_sets}, as there are two discrete groups'
+            assert indices.shape[-1] == self.num_discrete_sets, f'shape of input must end with {self.num_discrete_sets}, but got {indices.shape[-1]}'
             indices = indices + self.discrete_set_offsets
 
         embed_indices = self.discrete_indices[indices]
@@ -396,24 +397,23 @@ class ContinuousSelector(Module):
         continuous_indices = tensor(continuous_indices)
         assert continuous_indices.unique().numel() == continuous_indices.numel(), f'continuous indices must be unique, received {continuous_indices.tolist()}'
 
-        continuous_log_var_indices = None
-
-        continuous_log_var_indices = None
-        if continuous_log_var_embed:
-            continuous_log_var_indices = continuous_indices + num_continuous
-
         self.embed = embed
         self.continuous_mean_std = continuous_mean_std
         self.continuous_log_var_embed = continuous_log_var_embed
 
-        self.register_buffer('continuous_indices', continuous_indices + embedding_offset, persistent = False)
-        self.register_buffer('continuous_mean_log_var_indices', safe_cat((continuous_indices, continuous_log_var_indices)), persistent = False)
+        # offset by discrete
+
+        continuous_indices = continuous_indices + embedding_offset
+
+        if continuous_log_var_embed:
+            continuous_log_var_indices = continuous_indices + num_continuous # offset by continuous mu
+
+            continuous_indices = cat((continuous_indices, continuous_log_var_indices))
+
+        self.register_buffer('continuous_indices', continuous_indices, persistent = False)
 
     def get_embed(self):
         return self.embed(self.continuous_indices)
-
-    def get_mean_logvar_embed(self):
-        return self.embed(self.continuous_mean_log_var_indices)
 
 # base
 
@@ -470,15 +470,15 @@ class DiscreteContinuousSelector(Module):
 
     @property
     def discrete_indices(self):
-        return self.discrete_selector.discrete_indices
+        return self.discrete_selector.discrete_indices if exists(self.discrete_selector) else None
 
     @property
     def continuous_mean_std(self):
-        return self.continuous_selector.continuous_mean_std
+        return self.continuous_selector.continuous_mean_std if exists(self.continuous_selector) else None
 
     @property
     def continuous_log_var_embed(self):
-        return self.continuous_selector.continuous_log_var_embed
+        return self.continuous_selector.continuous_log_var_embed if exists(self.continuous_selector) else None
 
     # methods for inferring whether to return tuple or single value
 
@@ -667,9 +667,7 @@ class Base(Module):
             for group in discrete_indices:
                 assert len(group) > 0, 'empty discrete group'
 
-        if exists(continuous_indices):
-            if len(continuous_indices) > 0:
-                pass
+
 
         assert not exists(discrete_indices) or all([is_unique(indices) for indices in discrete_indices])
         assert not exists(continuous_indices) or is_unique(continuous_indices)
@@ -1045,6 +1043,8 @@ class Readout(Base):
             else:
                 discrete_losses = []
 
+                discrete_logits = cast_tuple(discrete_logits)
+
                 for discrete_logit, one_target in zip(discrete_logits, discrete_targets.unbind(dim = -1)):
 
                     discrete_loss = F.cross_entropy(
@@ -1170,7 +1170,7 @@ class Readout(Base):
         continuous_dist_params = None
 
         if selector.has_continuous:
-            continuous_unembed = selector.continuous_selector.get_mean_logvar_embed()
+            continuous_unembed = selector.continuous_selector.get_embed()
             continuous_dist_params = einsum(embed, continuous_unembed, '... d, nc d -> ... nc')
 
             if selector.continuous_log_var_embed:
