@@ -1292,10 +1292,10 @@ class ParameterlessReadout(Readout):
     def __init__(
         self,
         *args,
-        dim = 0,
         **kwargs
     ):
-        super().__init__(*args, dim = dim, **kwargs)
+        assert 'dim' not in kwargs
+        super().__init__(*args, dim = 0, **kwargs)
 
 # helper functions for creating both, with optional weight tying
 
