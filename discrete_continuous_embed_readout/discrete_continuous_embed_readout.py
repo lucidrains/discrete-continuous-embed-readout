@@ -404,7 +404,11 @@ class ContinuousSelector(Module):
         assert continuous_indices.unique().numel() == continuous_indices.numel(), f'continuous indices must be unique, received {continuous_indices.tolist()}'
 
         self.embed = embed
-        self.continuous_mean_std = continuous_mean_std
+
+        self.continuous_mean_std = None
+        if exists(continuous_mean_std):
+            self.continuous_mean_std = BufferModule(continuous_mean_std.data[continuous_indices])
+
         self.continuous_log_var_embed = continuous_log_var_embed
 
         # offset by discrete

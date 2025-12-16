@@ -168,11 +168,54 @@ sampled = readout.sample(logits) # (2, 16, 3)
 You can also define inputs dynamically at runtime if your architecture shares embeddings across different modalities.
 
 ```python
-discrete_config = [[0, 1, 2]] # specific indices for this input
-continuous_config = [0, 1]    # specific continuous indices
+import torch
+from discrete_continuous_embed_readout import EmbedAndReadout
+
+# 1. Initialize with the total capacity of the system
+#    e.g. 10 discrete embeddings total, 5 continuous dimensions total
+
+embed_readout = EmbedAndReadout(
+    dim = 512,
+    num_discrete = 10,
+    num_continuous = 5,
+    continuous_mean_std = torch.ones(5, 2) # normalization for continuous
+)
+
+embed, readout = embed_readout
+
+# 2. Define a Runtime Schema (Selector Config)
+#    This defines which specific embeddings this particular input uses.
+#    For example, this input uses discrete indices 0, 1, 2 and continuous indices 0, 1.
+
+discrete_config = [[0, 1, 2]] # List of lists (for potentially multiple discrete groups)
+continuous_config = [0, 1]    # List of indices
+selector_config = (discrete_config, continuous_config)
+
+# 3. Create Inputs that match the schema
+#    Discrete: 3 values (ranges matching the config is handled by index looking up the config)
+#    Continuous: 2 values
+
+# (Batch, Seq) - values must be valid for the local schema size (3)
+discrete_input = torch.randint(0, 3, (2, 32))
+
+# (Batch, Seq, 2)
+continuous_input = torch.randn(2, 32, 2)
+
+# 4. Embed with the specific selector config
 
 embeds = embed(
-    (discrete_in, continuous_in),
-    selector_config = (discrete_config, continuous_config)
+    (discrete_input, continuous_input),
+    selector_config = selector_config
 )
+
+# 5. Readout with the same selector config
+
+logits = readout(
+    embeds,
+    selector_config = selector_config
+)
+
+# logits will be a NamedTuple with .discrete and .continuous matching the config
+print(logits.discrete.shape)   # (2, 32, 3) - matches discrete_config size
+print(logits.continuous.shape) # (2, 32, 2, 2) - matches continuous_config size
 ```
