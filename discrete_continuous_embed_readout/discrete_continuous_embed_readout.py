@@ -342,7 +342,7 @@ class DiscreteSelector(Module):
     def __init__(
         self,
         discrete_set_indices: DiscreteConfig,
-        embeddings: nn.Embedding,
+        embeddings: nn.Embedding | None,
     ):
         super().__init__()
 
@@ -367,11 +367,17 @@ class DiscreteSelector(Module):
 
         embed_indices = self.discrete_indices[indices]
 
+        if not exists(self.embeddings):
+            raise RuntimeError('embeddings not present')
+
         return self.embeddings(embed_indices)
 
     def get_readout_embeds(
         self
     ):
+        if not exists(self.embeddings):
+            raise RuntimeError('embeddings not present')
+
         return self.embeddings(self.discrete_indices)
 
     def split_packed(
@@ -385,7 +391,7 @@ class ContinuousSelector(Module):
     def __init__(
         self,
         continuous_indices: ContinuousConfig,
-        embed: nn.Embedding,
+        embed: nn.Embedding | None,
         num_continuous,
         embedding_offset,
         continuous_mean_std: Module | None,
@@ -413,6 +419,9 @@ class ContinuousSelector(Module):
         self.register_buffer('continuous_indices', continuous_indices, persistent = False)
 
     def get_embed(self):
+        if not exists(self.embed):
+            raise RuntimeError('embeddings not present')
+
         return self.embed(self.continuous_indices)
 
 # base
@@ -506,7 +515,7 @@ class Base(Module):
     @beartype
     def __init__(
         self,
-        dim,
+        dim: int | None,
         num_discrete: int | tuple[int, ...] = 0,
         num_continuous: int = 0,
         selector: SelectorConfig | None = None,
@@ -573,6 +582,8 @@ class Base(Module):
         self.has_discrete = total_discrete > 0
         self.has_continuous = num_continuous > 0
 
+        self.has_continuous = num_continuous > 0
+
         assert total > 0, 'cannot have both discrete and continuous disabled'
 
         self.dim = dim
@@ -581,8 +592,11 @@ class Base(Module):
         # order will be [discrete] [continuous]
         # discrete is further broken up by groups if tuple of ints passed in - so [discrete group 1] [discrete group 2] ... [continuous]
 
-        self.embeddings = nn.Embedding(total, dim)
-        nn.init.normal_(self.embeddings.weight, std = 1e-2)
+        if exists(dim) and dim > 0:
+            self.embeddings = nn.Embedding(total, dim)
+            nn.init.normal_(self.embeddings.weight, std = 1e-2)
+        else:
+            self.embeddings = None
 
         # maybe norm and inverse norm
 
@@ -886,7 +900,7 @@ class Readout(Base):
 
     def log_prob_discrete(
         self,
-        discrete_logits:  Tensor | list[Tensor] | tuple[Tensor, ...], 
+        discrete_logits:  Tensor | list[Tensor] | tuple[Tensor, ...],
         sampled,
     ):
         dist = MultiCategorical(
@@ -1273,6 +1287,15 @@ class Readout(Base):
             self.kl_div_discrete(discrete_true, discrete_pred),
             self.kl_div_continuous(continuous_true, continuous_pred, selector = selector)
         )
+
+class ParameterlessReadout(Readout):
+    def __init__(
+        self,
+        *args,
+        dim = 0,
+        **kwargs
+    ):
+        super().__init__(*args, dim = dim, **kwargs)
 
 # helper functions for creating both, with optional weight tying
 

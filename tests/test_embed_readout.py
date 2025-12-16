@@ -494,7 +494,7 @@ def test_auto_squeeze_single_output():
         num_discrete = 100,
         return_only_discrete_or_continuous = True,
         readout_kwargs = dict(
-            auto_squeeze_single_output = True 
+            auto_squeeze_single_output = True
         )
     )
 
@@ -768,5 +768,61 @@ def test_lone_continuous_config():
     assert torch.is_tensor(dist)
     assert dist.shape == (batch_size, 2, 2)
 
+
     sampled = readout.sample(dist, selector_config = continuous_config)
     assert sampled.shape == (batch_size, 2)
+
+from discrete_continuous_embed_readout.discrete_continuous_embed_readout import ParameterlessReadout, rearrange
+
+def test_parameterless_readout():
+    num_discrete = 10
+    num_continuous = 2
+
+    readout = ParameterlessReadout(
+        num_discrete = num_discrete,
+        num_continuous = num_continuous,
+        continuous_log_var_embed = True
+    )
+
+    batch_size = 4
+
+    # create dummy logits
+    discrete_logits = torch.randn(batch_size, num_discrete)
+    continuous_params = torch.randn(batch_size, num_continuous * 2)
+    # continuous_params need to be shaped (batch, num_continuous, 2)
+    continuous_params = rearrange(continuous_params, '... (nc d) -> ... nc d', d = 2)
+
+    logits = (discrete_logits, continuous_params)
+
+    # 1. Test sample
+    sampled = readout.sample(logits)
+    discrete_sampled, continuous_sampled = sampled
+
+    assert discrete_sampled.shape == (batch_size,)
+    assert continuous_sampled.shape == (batch_size, num_continuous)
+
+    # 2. Test log_prob
+    log_probs = readout.log_prob(logits, sampled)
+    assert log_probs.discrete.shape == (batch_size,)
+    assert log_probs.continuous.shape == (batch_size, num_continuous)
+
+    # 3. Test entropy
+    entropies = readout.entropy(logits)
+    assert entropies.discrete.shape == (batch_size,)
+    assert entropies.continuous.shape == (batch_size, num_continuous)
+
+    # 4. Test calculate_loss
+    discrete_targets = torch.randint(0, num_discrete, (batch_size,))
+    continuous_targets = torch.randn(batch_size, num_continuous)
+
+    loss = readout.calculate_loss(logits, (discrete_targets, continuous_targets))
+    assert loss.discrete.numel() == 1 # scalar loss
+    assert loss.continuous.numel() == 1 # scalar loss
+
+    # 5. Test forward raises error
+    # forward attempts to project from embeddings which don't exist
+    try:
+        readout(torch.randn(batch_size, 512))
+        assert False, 'should have raised error'
+    except RuntimeError as e:
+        assert 'embeddings not present' in str(e) or 'object has no attribute' in str(e)
