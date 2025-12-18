@@ -751,7 +751,8 @@ class Embed(Base):
             exists(discrete) and
             selector.has_discrete and
             selector.discrete_selector.num_discrete_sets == 1 and
-            self.auto_append_discrete_set_dim
+            self.auto_append_discrete_set_dim and
+            discrete.shape[-1] != 1
         ):
             discrete = rearrange(discrete, '... -> ... 1')
 
