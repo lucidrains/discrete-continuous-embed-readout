@@ -1309,8 +1309,18 @@ def EmbedAndReadout(
     weight_tie = False,
     embed_kwargs: dict = dict(),
     readout_kwargs: dict = dict(),
+    explicit_single_action_dim_given: bool | None = None,
     **kwargs,
 ):
+    if exists(explicit_single_action_dim_given):
+        assert 'auto_append_discrete_set_dim' not in embed_kwargs, 'cannot pass `auto_append_discrete_set_dim` if `explicit_single_action_dim_given` is set'
+        assert 'auto_squeeze_single_output' not in readout_kwargs, 'cannot pass `auto_squeeze_single_output` if `explicit_single_action_dim_given` is set'
+
+        auto_unsqueeze_and_squeeze = not explicit_single_action_dim_given
+
+        embed_kwargs = {**embed_kwargs, 'auto_append_discrete_set_dim': auto_unsqueeze_and_squeeze}
+        readout_kwargs = {**readout_kwargs, 'auto_squeeze_single_output': auto_unsqueeze_and_squeeze}
+
     embed = Embed(*args, **embed_kwargs, **kwargs)
     readout = Readout(*args, **readout_kwargs, **kwargs)
 

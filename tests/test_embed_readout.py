@@ -826,3 +826,29 @@ def test_parameterless_readout():
         assert False, 'should have raised error'
     except RuntimeError as e:
         assert 'embeddings not present' in str(e) or 'object has no attribute' in str(e)
+
+def test_explicit_single_action_dim_given():
+    embed, readout = EmbedAndReadout(
+        dim = 512,
+        num_discrete = 100,
+        explicit_single_action_dim_given = True
+    )
+
+    discrete_input = torch.randint(0, 100, (2, 64, 1)) # explicitly 1 action dim
+
+    tokens = embed(discrete_input)
+    assert tokens.shape == (2, 64, 512)
+
+    logits = readout(tokens)
+    assert isinstance(logits, (list, tuple)) # auto_squeeze_single_output is False
+    assert len(logits) == 1
+    assert logits[0].shape == (2, 64, 100)
+
+    sampled = readout.sample(logits)
+    assert sampled.shape == (2, 64, 1) # no auto squeeze
+
+    log_probs = readout.log_prob(logits, sampled)
+    assert log_probs.shape == (2, 64, 1)
+
+    entropy = readout.entropy(logits)
+    assert entropy.shape == (2, 64, 1)
