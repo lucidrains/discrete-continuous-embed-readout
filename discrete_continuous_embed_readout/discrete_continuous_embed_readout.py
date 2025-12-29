@@ -951,10 +951,10 @@ class Readout(Base):
         dist = mean_log_var_to_normal_dist(continuous_dist_params)
         log_prob = dist.log_prob(gaussian_sampled)
 
-        if selector.continuous_squashed:
-            log_prob = log_prob - log(1 - sampled.pow(2), self.eps)
+        if not selector.continuous_squashed:
+            return log_prob
 
-        return log_prob
+        return log_prob - 2 * (log(tensor(2.)) - gaussian_sampled - F.softplus(-2 * gaussian_sampled))
 
     def maybe_concat(self, output, concat = False):
         if not concat:
