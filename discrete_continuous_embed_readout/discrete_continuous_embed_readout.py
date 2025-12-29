@@ -145,7 +145,7 @@ def gumbel_sample(t, temperature = 1., eps = 1e-20):
 def gaussian_sample(mu_log_var, temperature = 1.):
     mu, log_var = mu_log_var.unbind(dim = -1)
     std = (0.5 * log_var).exp()
-    return mu + torch.randn_like(std) * temperature
+    return mu + torch.randn_like(mu) * std * temperature
 
 def mean_log_var_to_normal_dist(mean_log_var):
     mean, log_var = mean_log_var.unbind(dim = -1)
