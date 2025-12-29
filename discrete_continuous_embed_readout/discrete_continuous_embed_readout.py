@@ -58,7 +58,10 @@ def default(v, d):
     return v if exists(v) else d
 
 def flatten(arr):
-    return [el for sub_arr in arr for el in sub_arr]
+    return [el for subarr in arr for el in subarr]
+
+def atanh(t, eps = 1e-6):
+    return 0.5 * (log(1 + t, eps = eps) - log(1 - t, eps = eps))
 
 def cast_tuple(t):
     return (t,) if not isinstance(t, tuple) else t
@@ -395,7 +398,8 @@ class ContinuousSelector(Module):
         num_continuous,
         embedding_offset,
         continuous_mean_std: Module | None,
-        continuous_log_var_embed
+        continuous_log_var_embed,
+        continuous_squashed = False
     ):
         super().__init__()
         # embedding is [discrete] [continuous mean] [?continuous log var]
@@ -409,6 +413,7 @@ class ContinuousSelector(Module):
         if exists(continuous_mean_std):
             self.continuous_mean_std = BufferModule(continuous_mean_std.data[continuous_indices])
 
+        self.continuous_squashed = continuous_squashed
         self.continuous_log_var_embed = continuous_log_var_embed
 
         # offset by discrete
@@ -443,6 +448,7 @@ class DiscreteContinuousSelector(Module):
         continuous_indices: list[int] | None = None,
         num_continuous: int = 0,
         embedding_offset: int = 0,
+        continuous_squashed = False
     ):
         super().__init__()
 
@@ -478,7 +484,8 @@ class DiscreteContinuousSelector(Module):
                 num_continuous = num_continuous,
                 embedding_offset = embedding_offset,
                 continuous_mean_std = continuous_mean_std,
-                continuous_log_var_embed = continuous_log_var_embed
+                continuous_log_var_embed = continuous_log_var_embed,
+                continuous_squashed = continuous_squashed
             )
 
     @property
@@ -492,6 +499,10 @@ class DiscreteContinuousSelector(Module):
     @property
     def continuous_log_var_embed(self):
         return self.continuous_selector.continuous_log_var_embed if exists(self.continuous_selector) else None
+
+    @property
+    def continuous_squashed(self):
+        return self.continuous_selector.continuous_squashed if exists(self.continuous_selector) else False
 
     # methods for inferring whether to return tuple or single value
 
@@ -528,6 +539,7 @@ class Base(Module):
         continuous_mean_std: Tensor | None = None,
         use_parallel_multi_discrete = True,
         return_only_discrete_or_continuous = True,
+        continuous_squashed = False,
         eps = 1e-6
     ):
         super().__init__()
@@ -613,6 +625,10 @@ class Base(Module):
 
             continuous_mean_std = BufferModule(continuous_mean_std)
 
+        # continuous action range
+
+        self.continuous_squashed = continuous_squashed
+
         # discrete related computed values
 
         self.use_parallel_multi_discrete = use_parallel_multi_discrete # sampling, entropy, log prob in parallel for multi-discrete
@@ -638,7 +654,8 @@ class Base(Module):
 
             selector = self.create_discrete_continuous_selector(
                 discrete_indices = discrete_indices,
-                continuous_indices = continuous_indices
+                continuous_indices = continuous_indices,
+                continuous_squashed = continuous_squashed
             )
 
             self.selectors.append(selector)
@@ -656,16 +673,18 @@ class Base(Module):
     def create_discrete_continuous_selector(
         self,
         discrete_indices = None,
-        continuous_indices = None
+        continuous_indices = None,
+        continuous_squashed = False
     ):
         return DiscreteContinuousSelector(
-            continuous_log_var_embed = self.continuous_log_var_embed,
-            continuous_mean_std = self.continuous_mean_std,
             embeddings = self.embeddings,
             discrete_set_indices = discrete_indices,
             continuous_indices = continuous_indices,
             num_continuous = self.num_continuous,
-            embedding_offset = self.embedding_offset
+            embedding_offset = self.embedding_offset,
+            continuous_log_var_embed = self.continuous_log_var_embed,
+            continuous_mean_std = self.continuous_mean_std,
+            continuous_squashed = continuous_squashed
         )
 
     def _process_selector_config(self, selector: SelectorConfig):
@@ -877,6 +896,9 @@ class Readout(Base):
 
         sampled = gaussian_sample(continuous_dist_params, temperature)
 
+        if selector.continuous_squashed:
+            sampled = sampled.tanh()
+
         if not self.can_norm_continuous:
             return sampled
 
@@ -922,10 +944,17 @@ class Readout(Base):
         selector = None
     ):
         assert exists(selector)
-
         assert selector.continuous_log_var_embed
+
+        gaussian_sampled = atanh(sampled, eps = self.eps) if selector.continuous_squashed else sampled
+
         dist = mean_log_var_to_normal_dist(continuous_dist_params)
-        return dist.log_prob(sampled)
+        log_prob = dist.log_prob(gaussian_sampled)
+
+        if selector.continuous_squashed:
+            log_prob = log_prob - log(1 - sampled.pow(2), self.eps)
+
+        return log_prob
 
     def maybe_concat(self, output, concat = False):
         if not concat:
@@ -989,6 +1018,10 @@ class Readout(Base):
     ):
         assert exists(selector), 'selector required'
         assert selector.continuous_log_var_embed, 'continuous log var embed required'
+
+        if selector.continuous_squashed:
+            return None
+
         dist = mean_log_var_to_normal_dist(continuous_dist_params)
         return dist.entropy()
 
@@ -1262,6 +1295,8 @@ class Readout(Base):
     ):
         assert exists(selector)
         assert selector.continuous_log_var_embed
+
+        assert not selector.continuous_squashed, 'kl divergence not supported for squashed gaussian'
 
         dist_true = mean_log_var_to_normal_dist(continuous_dist_params_true)
         dist_pred = mean_log_var_to_normal_dist(continuous_dist_params_pred)
