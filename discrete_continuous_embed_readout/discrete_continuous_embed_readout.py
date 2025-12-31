@@ -914,6 +914,7 @@ class Readout(Base):
     def sample(
         self,
         dist,
+        temperature = 1.,
         selector_index: int | None = None,
         selector_config: SelectorConfig | None = None
     ):
@@ -921,10 +922,10 @@ class Readout(Base):
 
         if selector.one_of_discrete_or_continuous:
             if selector.has_discrete:
-                return self.sample_discrete(dist)
+                return self.sample_discrete(dist, temperature = temperature)
 
             if selector.has_continuous:
-                return self.sample_continuous(dist, selector = selector)
+                return self.sample_continuous(dist, selector = selector, temperature = temperature)
 
         discrete, continuous = dist
         return self.sample_discrete(discrete), self.sample_continuous(continuous, selector = selector)
@@ -951,10 +952,20 @@ class Readout(Base):
         assert exists(selector)
         assert selector.continuous_log_var_embed
 
+        continuous_mean_std = selector.continuous_mean_std
+
+        if exists(continuous_mean_std):
+            mean, std = continuous_mean_std.data.unbind(dim = -1)
+            sampled = (sampled - mean) / std.clamp_min(self.eps)
+
         gaussian_sampled = atanh(sampled, eps = self.eps) if selector.continuous_squashed else sampled
 
         dist = mean_log_var_to_normal_dist(continuous_dist_params)
         log_prob = dist.log_prob(gaussian_sampled)
+
+        if exists(continuous_mean_std):
+            _, std = continuous_mean_std.data.unbind(dim = -1)
+            log_prob = log_prob - log(std)
 
         if not selector.continuous_squashed:
             return log_prob
@@ -1024,11 +1035,16 @@ class Readout(Base):
         assert exists(selector), 'selector required'
         assert selector.continuous_log_var_embed, 'continuous log var embed required'
 
-        if selector.continuous_squashed:
-            return None
-
         dist = mean_log_var_to_normal_dist(continuous_dist_params)
-        return dist.entropy()
+        entropy = dist.entropy()
+
+        continuous_mean_std = selector.continuous_mean_std
+
+        if exists(continuous_mean_std):
+            _, std = continuous_mean_std.data.unbind(dim = -1)
+            entropy = entropy + log(std)
+
+        return entropy
 
     def entropy(
         self,
@@ -1121,8 +1137,7 @@ class Readout(Base):
 
         if selector.has_continuous:
             if selector.continuous_log_var_embed:
-                gaussian = mean_log_var_to_normal_dist(continuous_dist_params)
-                continuous_losses = -gaussian.log_prob(continuous_targets)
+                continuous_losses = -self.log_prob_continuous(continuous_dist_params, continuous_targets, selector = selector)
             else:
                 continuous_losses = F.mse_loss(continuous_dist_params, continuous_targets, reduction = 'none')
 
@@ -1305,8 +1320,6 @@ class Readout(Base):
     ):
         assert exists(selector)
         assert selector.continuous_log_var_embed
-
-        assert not selector.continuous_squashed, 'kl divergence not supported for squashed gaussian'
 
         dist_true = mean_log_var_to_normal_dist(continuous_dist_params_true)
         dist_pred = mean_log_var_to_normal_dist(continuous_dist_params_pred)
