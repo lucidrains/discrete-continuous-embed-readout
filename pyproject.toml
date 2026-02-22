@@ -1,6 +1,6 @@
 [project]
 name = "discrete-continuous-embed-readout"
-version = "0.1.12"
+version = "0.1.14"
 description = "Discrete Continuous Embed Readout"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -29,8 +29,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://pypi.org/project/discrete-continuous-embed-readout/"
-Repository = "https://github.com/lucidrains/discrete-continuous-embed-readout"
+Homepage = "https://codeberg.org/lucidrains/discrete-continuous-embed-readout"
+Repository = "https://codeberg.org/lucidrains/discrete-continuous-embed-readout"
 
 [project.optional-dependencies]
 examples = []
@@ -57,3 +57,17 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["discrete_continuous_embed_readout"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "discrete_continuous_embed_readout",
+    "pyproject.toml",
+    "README.md",
+    "LICENSE"
+]
+
+exclude = [
+    ".*/",
+    "tests/.*",
+    "test_*.py"
+]

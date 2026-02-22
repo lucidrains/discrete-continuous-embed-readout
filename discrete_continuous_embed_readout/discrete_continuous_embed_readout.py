@@ -66,7 +66,18 @@ def atanh(t, eps = 1e-6):
 def cast_tuple(t):
     return (t,) if not isinstance(t, tuple) else t
 
-def softclamp(t, value = 15.):
+@beartype
+def assert_valid_range(r: tuple[float, float]):
+    min_val, max_val = r
+    assert min_val < max_val, 'range minimum must be strictly less than maximum'
+    return r
+
+def rescale(t, old_range, new_range):
+    old_min, old_max = old_range
+    new_min, new_max = new_range
+    return (t - old_min) / (old_max - old_min) * (new_max - new_min) + new_min
+
+def softclamp(t, value = 1.):
     return (t / value).tanh() * value
 
 def safe_cat(tensors, dim = 0):
@@ -852,14 +863,17 @@ class Readout(Base):
         return_one_discrete_logits = None,
         auto_squeeze_single_output = True,
         ignore_index = -1,
-        continuous_softclamp_logvar: float | None = None,
+        continuous_log_var_clamp: bool = False,
+        continuous_log_var_clamp_range: tuple[float, float] = (-10., 2.),
         **kwargs
     ):
         super().__init__(*args, **kwargs)
         self.ignore_index = ignore_index
         self.auto_squeeze_single_output = auto_squeeze_single_output
         self.return_one_discrete_logits = default(return_one_discrete_logits, self.num_discrete_sets == 1)
-        self.continuous_softclamp_logvar = continuous_softclamp_logvar
+        self.continuous_log_var_clamp = continuous_log_var_clamp
+        self.continuous_log_var_clamp_range = assert_valid_range(continuous_log_var_clamp_range)
+
         assert not (self.return_one_discrete_logits and self.num_discrete_sets > 1), 'cannot return only one discrete logit group if greater than one group'
 
         self.register_buffer('zero', tensor(0.), persistent = False)
@@ -1247,9 +1261,12 @@ class Readout(Base):
             if selector.continuous_log_var_embed:
                 continuous_dist_params = rearrange(continuous_dist_params, '... (mu_logvar nc) -> ... nc mu_logvar', mu_logvar = 2)
 
-                if exists(self.continuous_softclamp_logvar):
+                if self.continuous_log_var_clamp:
                     mu, log_var = continuous_dist_params.unbind(dim = -1)
-                    log_var = softclamp(log_var, self.continuous_softclamp_logvar)
+
+                    min_val, max_val = self.continuous_log_var_clamp_range
+                    log_var = (log_var / (max_val - min_val)).tanh()
+                    log_var = rescale(log_var, (-1., 1.), self.continuous_log_var_clamp_range)
                     continuous_dist_params = stack((mu, log_var), dim = -1)
 
         # maybe only return distribution parameters

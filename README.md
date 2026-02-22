@@ -219,3 +219,15 @@ logits = readout(
 print(logits.discrete.shape)   # (2, 32, 3) - matches discrete_config size
 print(logits.continuous.shape) # (2, 32, 2, 2) - matches continuous_config size
 ```
+
+## Citations
+
+```bibtex
+@article{lakshminarayanan2017simple,
+    title     = {Simple and scalable predictive uncertainty estimation using deep ensembles},
+    author    = {Lakshminarayanan, Balaji and Pritzel, Alexander and Blundell, Charles},
+    journal   = {Advances in neural information processing systems},
+    volume    = {30},
+    year      = {2017}
+}
+```
