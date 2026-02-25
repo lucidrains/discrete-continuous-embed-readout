@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from torch.nn import Module, ModuleList
 from torch.utils._pytree import tree_map
 
-from torch.distributions import Normal
+from torch.distributions import Normal, Beta, Distribution, Kumaraswamy, kl_divergence
 
 # einops
 
@@ -148,7 +148,10 @@ def segmented_softmax(flat_logits, lengths):
 def gumbel_noise(t, eps):
     return -log(-log(torch.rand_like(t), eps), eps)
 
-def gumbel_sample(t, temperature = 1., eps = 1e-20):
+def gumbel_sample(t, temperature = 1., differentiable = False, eps = 1e-20):
+    if differentiable:
+        return F.gumbel_softmax(t, tau = temperature, hard = True, dim = -1)
+
     if temperature <= 0.:
         return t.argmax(dim = -1)
 
@@ -156,23 +159,97 @@ def gumbel_sample(t, temperature = 1., eps = 1e-20):
     t = t / max(temperature, eps) + noise
     return t.argmax(dim = -1)
 
-def gaussian_sample(mu_log_var, temperature = 1.):
-    mu, log_var = mu_log_var.unbind(dim = -1)
-    std = (0.5 * log_var).exp()
-    return mu + torch.randn_like(mu) * std * temperature
+# continuous distributions
 
-def mean_log_var_to_normal_dist(mean_log_var):
-    mean, log_var = mean_log_var.unbind(dim = -1)
-    std = (0.5 * log_var).exp()
-    return Normal(mean, std)
+class ContinuousDistribution(Module):
+    def __init__(self, eps = 1e-6):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, params, differentiable = False):
+        raise NotImplementedError
+
+class Gaussian(ContinuousDistribution):
+    def __init__(self, log_var_clamp_range: tuple[float, float] | None = None, eps = 1e-6):
+        super().__init__(eps = eps)
+        self.log_var_clamp_range = log_var_clamp_range
+
+    def forward(self, params, differentiable = False):
+        dist = self.dist(params)
+        return dist.rsample() if differentiable else dist.sample()
+
+    def dist(self, params):
+        assert params.shape[-1] == 2
+        mu, log_var = params.unbind(dim = -1)
+
+        if exists(self.log_var_clamp_range):
+            min_val, max_val = self.log_var_clamp_range
+            log_var = (log_var / (max_val - min_val)).tanh()
+            log_var = rescale(log_var, (-1., 1.), self.log_var_clamp_range)
+
+        std = (0.5 * log_var).exp()
+        return Normal(mu, std)
+
+class BetaDist(ContinuousDistribution):
+    def __init__(self, unimodal = False, eps = 1e-6):
+        super().__init__(eps = eps)
+        self.unimodal = unimodal
+
+    def forward(self, params, differentiable = False):
+        if differentiable:
+            raise RuntimeError('Beta distribution does not support differentiable sampling (rsample) in PyTorch')
+
+        dist = self.dist(params)
+        return dist.sample()
+
+    def dist(self, params):
+        assert params.shape[-1] == 2
+        a, b = params.unbind(dim = -1)
+
+        offset = 1. if self.unimodal else self.eps
+        a = F.softplus(a) + offset
+        b = F.softplus(b) + offset
+
+        return Beta(a, b)
+
+class KumaraswamyDist(ContinuousDistribution):
+    def __init__(self, unimodal = False, eps = 1e-6):
+        super().__init__(eps = eps)
+        self.unimodal = unimodal
+
+    def forward(self, params, differentiable = False):
+        dist = self.dist(params)
+        return dist.rsample() if differentiable else dist.sample()
+
+    def dist(self, params):
+        assert params.shape[-1] == 2
+        a, b = params.unbind(dim = -1)
+
+        offset = 1. if self.unimodal else self.eps
+        a = F.softplus(a) + offset
+        b = F.softplus(b) + offset
+
+        return Kumaraswamy(a, b)
+
+
+CONTINUOUS_DISTRIBUTIONS = {
+    'gaussian': Gaussian,
+    'beta': BetaDist,
+    'kumaraswamy': KumaraswamyDist
+}
 
 # multi categorical
 
 def gumbel_sample_multi_categorical(
     dists,
     temperature = 1.,
+    differentiable = False,
     eps = 1e-20
 ):
+    if differentiable:
+        dists = [F.gumbel_softmax(d, tau = temperature, hard = True, dim = -1) for d in dists]
+        return cat(dists, dim = -1)
+
     is_greedy = temperature <= 0.
     assert len(dists) > 0, 'empty distributions'
     one_dist = first(dists)
@@ -218,6 +295,7 @@ class MultiCategorical:
     def sample(
         self,
         temperature = 1.,
+        differentiable = False,
         eps = 1e-20
     ):
         # handle list or tuple of logits
@@ -228,13 +306,18 @@ class MultiCategorical:
             logits = (logits,)
 
         if len(logits) > 1 and self.use_parallel_multi_discrete:
-            sampled = gumbel_sample_multi_categorical(logits, temperature = temperature, eps = eps)
+            sampled = gumbel_sample_multi_categorical(logits, temperature = temperature, differentiable = differentiable, eps = eps)
         else:
-            sampled = tree_map_tensor(logits, partial(gumbel_sample, temperature = temperature, eps = eps))
-            sampled = stack(sampled, dim = -1)
+            sampled = tree_map_tensor(logits, partial(gumbel_sample, temperature = temperature, differentiable = differentiable, eps = eps))
+
+            if differentiable:
+                sampled = cat(sampled, dim = -1)
+            else:
+                sampled = stack(sampled, dim = -1)
 
         if not self._is_list_tuple:
-            sampled = rearrange(sampled, '... 1 -> ...')
+            if not differentiable:
+                sampled = rearrange(sampled, '... 1 -> ...')
 
         return sampled
 
@@ -553,6 +636,8 @@ class Base(Module):
         continuous_mean_std: Tensor | None = None,
         use_parallel_multi_discrete = True,
         return_only_discrete_or_continuous = True,
+        continuous_dist_type = 'gaussian',
+        continuous_dist_kwargs: dict = dict(),
         continuous_squashed = False,
         eps = 1e-6
     ):
@@ -683,6 +768,9 @@ class Base(Module):
         # epsilon
 
         self.eps = eps
+
+        self.continuous_dist_type = continuous_dist_type
+        self.continuous_dist_kwargs = continuous_dist_kwargs
 
     def create_discrete_continuous_selector(
         self,
@@ -863,18 +951,21 @@ class Readout(Base):
         return_one_discrete_logits = None,
         auto_squeeze_single_output = True,
         ignore_index = -1,
-        continuous_log_var_clamp: bool = False,
-        continuous_log_var_clamp_range: tuple[float, float] = (-10., 2.),
         **kwargs
     ):
         super().__init__(*args, **kwargs)
         self.ignore_index = ignore_index
         self.auto_squeeze_single_output = auto_squeeze_single_output
         self.return_one_discrete_logits = default(return_one_discrete_logits, self.num_discrete_sets == 1)
-        self.continuous_log_var_clamp = continuous_log_var_clamp
-        self.continuous_log_var_clamp_range = assert_valid_range(continuous_log_var_clamp_range)
 
         assert not (self.return_one_discrete_logits and self.num_discrete_sets > 1), 'cannot return only one discrete logit group if greater than one group'
+
+        # setup continuous distribution
+
+        dist_class = CONTINUOUS_DISTRIBUTIONS.get(self.continuous_dist_type)
+        assert exists(dist_class), f'continuous distribution type {self.continuous_dist_type} must be one of {CONTINUOUS_DISTRIBUTIONS.keys()}'
+
+        self.continuous_dist = dist_class(**self.continuous_dist_kwargs, eps = self.eps)
 
         self.register_buffer('zero', tensor(0.), persistent = False)
 
@@ -882,6 +973,7 @@ class Readout(Base):
         self,
         discrete_logits: Tensor | list[Tensor] | tuple[Tensor, ...],
         temperature = 1,
+        differentiable = False,
         filter_fn: Callable  = identity,
         filter_kwargs: dict = dict()
     ):
@@ -897,10 +989,11 @@ class Readout(Base):
             use_parallel_multi_discrete = self.use_parallel_multi_discrete
         )
 
-        sampled = dist.sample(temperature = temperature, eps = self.eps)
+        sampled = dist.sample(temperature = temperature, differentiable = differentiable, eps = self.eps)
 
         if not is_list_tuple and self.auto_squeeze_single_output:
-            sampled = rearrange(sampled, '... 1 -> ...')
+            if not differentiable:
+                sampled = rearrange(sampled, '... 1 -> ...')
 
         return sampled
 
@@ -908,12 +1001,13 @@ class Readout(Base):
         self,
         continuous_dist_params,
         temperature = 1.,
+        differentiable = False,
         selector = None
     ):
         assert exists(selector), 'selector required for continuous sampling'
         assert selector.continuous_log_var_embed, 'continuous log var embed required'
 
-        sampled = gaussian_sample(continuous_dist_params, temperature)
+        sampled = self.continuous_dist(continuous_dist_params, differentiable = differentiable)
 
         if selector.continuous_squashed:
             sampled = sampled.tanh()
@@ -929,6 +1023,7 @@ class Readout(Base):
         self,
         dist,
         temperature = 1.,
+        differentiable = False,
         selector_index: int | None = None,
         selector_config: SelectorConfig | None = None
     ):
@@ -936,13 +1031,13 @@ class Readout(Base):
 
         if selector.one_of_discrete_or_continuous:
             if selector.has_discrete:
-                return self.sample_discrete(dist, temperature = temperature)
+                return self.sample_discrete(dist, temperature = temperature, differentiable = differentiable)
 
             if selector.has_continuous:
-                return self.sample_continuous(dist, selector = selector, temperature = temperature)
+                return self.sample_continuous(dist, selector = selector, temperature = temperature, differentiable = differentiable)
 
         discrete, continuous = dist
-        return self.sample_discrete(discrete), self.sample_continuous(continuous, selector = selector)
+        return self.sample_discrete(discrete, differentiable = differentiable), self.sample_continuous(continuous, selector = selector, differentiable = differentiable)
 
     def log_prob_discrete(
         self,
@@ -974,7 +1069,7 @@ class Readout(Base):
 
         gaussian_sampled = atanh(sampled, eps = self.eps) if selector.continuous_squashed else sampled
 
-        dist = mean_log_var_to_normal_dist(continuous_dist_params)
+        dist = self.continuous_dist.dist(continuous_dist_params)
         log_prob = dist.log_prob(gaussian_sampled)
 
         if exists(continuous_mean_std):
@@ -1049,7 +1144,7 @@ class Readout(Base):
         assert exists(selector), 'selector required'
         assert selector.continuous_log_var_embed, 'continuous log var embed required'
 
-        dist = mean_log_var_to_normal_dist(continuous_dist_params)
+        dist = self.continuous_dist.dist(continuous_dist_params)
         entropy = dist.entropy()
 
         continuous_mean_std = selector.continuous_mean_std
@@ -1261,14 +1356,6 @@ class Readout(Base):
             if selector.continuous_log_var_embed:
                 continuous_dist_params = rearrange(continuous_dist_params, '... (mu_logvar nc) -> ... nc mu_logvar', mu_logvar = 2)
 
-                if self.continuous_log_var_clamp:
-                    mu, log_var = continuous_dist_params.unbind(dim = -1)
-
-                    min_val, max_val = self.continuous_log_var_clamp_range
-                    log_var = (log_var / (max_val - min_val)).tanh()
-                    log_var = rescale(log_var, (-1., 1.), self.continuous_log_var_clamp_range)
-                    continuous_dist_params = stack((mu, log_var), dim = -1)
-
         # maybe only return distribution parameters
 
         if not return_loss:
@@ -1338,10 +1425,10 @@ class Readout(Base):
         assert exists(selector)
         assert selector.continuous_log_var_embed
 
-        dist_true = mean_log_var_to_normal_dist(continuous_dist_params_true)
-        dist_pred = mean_log_var_to_normal_dist(continuous_dist_params_pred)
+        dist_true = self.continuous_dist.dist(continuous_dist_params_true)
+        dist_pred = self.continuous_dist.dist(continuous_dist_params_pred)
 
-        return torch.distributions.kl.kl_divergence(dist_true, dist_pred)
+        return kl_divergence(dist_true, dist_pred)
 
     def kl_div(
         self,
