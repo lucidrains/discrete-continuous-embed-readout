@@ -166,6 +166,10 @@ class ContinuousDistribution(Module):
         super().__init__()
         self.eps = eps
 
+    @property
+    def default_range(self):
+        raise NotImplementedError
+
     def forward(self, params, differentiable = False):
         raise NotImplementedError
 
@@ -173,6 +177,10 @@ class Gaussian(ContinuousDistribution):
     def __init__(self, log_var_clamp_range: tuple[float, float] | None = None, eps = 1e-6):
         super().__init__(eps = eps)
         self.log_var_clamp_range = log_var_clamp_range
+
+    @property
+    def default_range(self):
+        return None
 
     def forward(self, params, differentiable = False):
         dist = self.dist(params)
@@ -195,6 +203,10 @@ class BetaDist(ContinuousDistribution):
         super().__init__(eps = eps)
         self.unimodal = unimodal
 
+    @property
+    def default_range(self):
+        return (0., 1.)
+
     def forward(self, params, differentiable = False):
         if differentiable:
             raise RuntimeError('Beta distribution does not support differentiable sampling (rsample) in PyTorch')
@@ -216,6 +228,10 @@ class KumaraswamyDist(ContinuousDistribution):
     def __init__(self, unimodal = False, eps = 1e-6):
         super().__init__(eps = eps)
         self.unimodal = unimodal
+
+    @property
+    def default_range(self):
+        return (0., 1.)
 
     def forward(self, params, differentiable = False):
         dist = self.dist(params)
@@ -603,22 +619,19 @@ class DiscreteContinuousSelector(Module):
 
     # methods for inferring whether to return tuple or single value
 
-    def validate_and_return_inputs(
-        self,
-        inp
-    ):
+    def validate_and_return_inputs(self, inp):
         if not is_tensor(inp):
             return inp
 
         assert self.one_of_discrete_or_continuous, 'input validation only supported for single modality selectors'
-        dtype = inp.dtype
 
-        if dtype in (torch.int, torch.long) and self.has_discrete:
+        if inp.dtype in (torch.int, torch.long) and self.has_discrete:
             return (inp, None)
-        elif dtype == torch.float and self.has_continuous:
+
+        if inp.dtype.is_floating_point and self.has_continuous:
             return (None, inp)
-        else:
-            raise ValueError('invalid tensor')
+
+        raise ValueError(f'invalid tensor of dtype {inp.dtype} for continuous ({self.has_continuous}) or discrete ({self.has_discrete})')
 
 # base
 
@@ -962,8 +975,8 @@ class Readout(Base):
 
         # setup continuous distribution
 
-        dist_class = CONTINUOUS_DISTRIBUTIONS.get(self.continuous_dist_type)
-        assert exists(dist_class), f'continuous distribution type {self.continuous_dist_type} must be one of {CONTINUOUS_DISTRIBUTIONS.keys()}'
+        assert self.continuous_dist_type in CONTINUOUS_DISTRIBUTIONS, f'continuous distribution type {self.continuous_dist_type} must be one of {CONTINUOUS_DISTRIBUTIONS.keys()}'
+        dist_class = CONTINUOUS_DISTRIBUTIONS[self.continuous_dist_type]
 
         self.continuous_dist = dist_class(**self.continuous_dist_kwargs, eps = self.eps)
 
@@ -1002,7 +1015,8 @@ class Readout(Base):
         continuous_dist_params,
         temperature = 1.,
         differentiable = False,
-        selector = None
+        selector = None,
+        rescale_range = None
     ):
         assert exists(selector), 'selector required for continuous sampling'
         assert selector.continuous_log_var_embed, 'continuous log var embed required'
@@ -1012,12 +1026,16 @@ class Readout(Base):
         if selector.continuous_squashed:
             sampled = sampled.tanh()
 
-        if not self.can_norm_continuous:
-            return sampled
+        if self.can_norm_continuous:
+            mean, std = selector.continuous_mean_std.data.unbind(dim = -1)
+            sampled = sampled * std + mean
 
-        mean, std = selector.continuous_mean_std.data.unbind(dim = -1)
-        inverse_normed = sampled * std + mean
-        return inverse_normed
+        if exists(rescale_range):
+            from_range = (-1., 1.) if selector.continuous_squashed else self.continuous_dist.default_range
+            assert exists(from_range), f'cannot rescale continuous distribution {self.continuous_dist_type} as it does not have a default range'
+            sampled = rescale(sampled, from_range, rescale_range)
+
+        return sampled
 
     def sample(
         self,
@@ -1025,7 +1043,8 @@ class Readout(Base):
         temperature = 1.,
         differentiable = False,
         selector_index: int | None = None,
-        selector_config: SelectorConfig | None = None
+        selector_config: SelectorConfig | None = None,
+        rescale_range = None
     ):
         selector = self.get_selector(selector_index, selector_config = selector_config)
 
@@ -1034,10 +1053,10 @@ class Readout(Base):
                 return self.sample_discrete(dist, temperature = temperature, differentiable = differentiable)
 
             if selector.has_continuous:
-                return self.sample_continuous(dist, selector = selector, temperature = temperature, differentiable = differentiable)
+                return self.sample_continuous(dist, selector = selector, temperature = temperature, differentiable = differentiable, rescale_range = rescale_range)
 
         discrete, continuous = dist
-        return self.sample_discrete(discrete, differentiable = differentiable), self.sample_continuous(continuous, selector = selector, differentiable = differentiable)
+        return self.sample_discrete(discrete, differentiable = differentiable), self.sample_continuous(continuous, selector = selector, differentiable = differentiable, rescale_range = rescale_range)
 
     def log_prob_discrete(
         self,

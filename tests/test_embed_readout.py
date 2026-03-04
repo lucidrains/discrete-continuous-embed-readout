@@ -852,3 +852,36 @@ def test_explicit_single_action_dim_given():
 
     entropy = readout.entropy(logits)
     assert entropy.shape == (2, 64, 1)
+
+def test_readout_rescaling():
+    # 1. test kumaraswamy rescaling
+
+    readout = Readout(
+        dim = 512,
+        num_continuous = 4,
+        continuous_dist_type = 'kumaraswamy',
+        continuous_squashed = False
+    )
+
+    logits = torch.randn(2, 4, 2)
+    rescale_range = (-5., 5.)
+    sampled = readout.sample(logits, rescale_range = rescale_range)
+
+    assert (sampled >= -5.0001).all() and (sampled <= 5.0001).all()
+    assert (sampled.abs() > 1.).any()
+
+    # 2. test squashed gaussian rescaling
+
+    readout = Readout(
+        dim = 512,
+        num_continuous = 4,
+        continuous_dist_type = 'gaussian',
+        continuous_squashed = True
+    )
+
+    logits = torch.randn(2, 4, 2)
+    rescale_range = (10., 20.)
+    sampled = readout.sample(logits, rescale_range = rescale_range)
+
+    assert (sampled >= 9.999).all() and (sampled <= 20.001).all()
+    assert (sampled > 1.).all()
