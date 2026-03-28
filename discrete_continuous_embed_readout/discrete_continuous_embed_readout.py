@@ -208,11 +208,8 @@ class BetaDist(ContinuousDistribution):
         return (0., 1.)
 
     def forward(self, params, differentiable = False):
-        if differentiable:
-            raise RuntimeError('Beta distribution does not support differentiable sampling (rsample) in PyTorch')
-
         dist = self.dist(params)
-        return dist.sample()
+        return dist.rsample() if differentiable else dist.sample()
 
     def dist(self, params):
         assert params.shape[-1] == 2
