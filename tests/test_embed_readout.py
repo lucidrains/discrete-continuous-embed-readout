@@ -885,3 +885,31 @@ def test_readout_rescaling():
 
     assert (sampled >= 9.999).all() and (sampled <= 20.001).all()
     assert (sampled > 1.).all()
+
+def test_continuous_native_range():
+    readout = Readout(
+        dim = 512,
+        num_continuous = 4,
+        continuous_dist_type = 'beta'
+    )
+
+    t = torch.tensor([0.5, 0.5])
+    rescaled_to = readout.rescale_to_native(torch.tensor([5., 5.]), (0., 10.))
+    assert torch.allclose(rescaled_to, t)
+
+    rescaled_from = readout.rescale_from_native(t, (0., 10.))
+    assert torch.allclose(rescaled_from, torch.tensor([5., 5.]))
+
+    readout_squashed = Readout(
+        dim = 512,
+        num_continuous = 4,
+        continuous_dist_type = 'gaussian',
+        continuous_squashed = True
+    )
+
+    t_squashed = torch.tensor([0., 0.])
+    rescaled_to_sq = readout_squashed.rescale_to_native(torch.tensor([5., 5.]), (0., 10.))
+    assert torch.allclose(rescaled_to_sq, t_squashed)
+
+    rescaled_from_sq = readout_squashed.rescale_from_native(t_squashed, (0., 10.))
+    assert torch.allclose(rescaled_from_sq, torch.tensor([5., 5.]))

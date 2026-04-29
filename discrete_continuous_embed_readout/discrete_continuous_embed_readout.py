@@ -736,6 +736,8 @@ class Base(Module):
 
         # continuous action range
 
+        assert not (continuous_squashed and continuous_dist_type != 'gaussian'), 'squashed continuous distribution is only supported for gaussian distributions'
+
         self.continuous_squashed = continuous_squashed
 
         # discrete related computed values
@@ -978,6 +980,36 @@ class Readout(Base):
         self.continuous_dist = dist_class(**self.continuous_dist_kwargs, eps = self.eps)
 
         self.register_buffer('zero', tensor(0.), persistent = False)
+
+    def get_continuous_native_range(
+        self,
+        selector_index: int | None = None,
+        selector_config: SelectorConfig | None = None
+    ):
+        selector = self.get_selector(selector_index, selector_config)
+        return (-1., 1.) if selector.continuous_squashed else self.continuous_dist.default_range
+
+    def rescale_from_native(
+        self,
+        t,
+        target_range,
+        selector_index: int | None = None,
+        selector_config: SelectorConfig | None = None
+    ):
+        native_range = self.get_continuous_native_range(selector_index, selector_config)
+        assert exists(native_range), f'cannot rescale continuous distribution {self.continuous_dist_type} as it does not have a default range'
+        return rescale(t, native_range, target_range)
+
+    def rescale_to_native(
+        self,
+        t,
+        source_range,
+        selector_index: int | None = None,
+        selector_config: SelectorConfig | None = None
+    ):
+        native_range = self.get_continuous_native_range(selector_index, selector_config)
+        assert exists(native_range), f'cannot rescale continuous distribution {self.continuous_dist_type} as it does not have a default range'
+        return rescale(t, source_range, native_range)
 
     def sample_discrete(
         self,
