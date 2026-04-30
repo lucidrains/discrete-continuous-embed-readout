@@ -1243,18 +1243,20 @@ class Readout(Base):
         discrete_logits = logits
         continuous_dist_params = logits
 
-        if selector.has_discrete and selector.has_continuous:
-            assert isinstance(logits, (tuple, list, DiscreteContinuous)) and len(logits) == 2, f'logits must be tuple of (discrete, continuous) when both are present, received {type(logits)}'
+        if isinstance(logits, (tuple, list, DiscreteContinuous)) and len(logits) == 2:
             discrete_logits, continuous_dist_params = logits
+        elif selector.has_discrete and selector.has_continuous:
+            raise ValueError(f'logits must be tuple of (discrete, continuous) when both are present, received {type(logits)}')
 
         # handle destructuring of targets
 
         discrete_targets = targets
         continuous_targets = targets
 
-        if selector.has_discrete and selector.has_continuous:
-            assert isinstance(targets, (tuple, list, DiscreteContinuous)) and len(targets) == 2, f'targets must be tuple of (discrete, continuous) when both are present, received {type(targets)}'
+        if isinstance(targets, (tuple, list, DiscreteContinuous)) and len(targets) == 2:
             discrete_targets, continuous_targets = targets
+        elif selector.has_discrete and selector.has_continuous:
+            raise ValueError(f'targets must be tuple of (discrete, continuous) when both are present, received {type(targets)}')
 
         # take care of only one discrete logit group, as in language modeling
 
