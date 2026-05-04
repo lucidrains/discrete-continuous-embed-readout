@@ -649,6 +649,7 @@ class Base(Module):
         continuous_dist_type = 'gaussian',
         continuous_dist_kwargs: dict = dict(),
         continuous_squashed = False,
+        regression_loss_type = 'mse',
         eps = 1e-6
     ):
         super().__init__()
@@ -739,6 +740,9 @@ class Base(Module):
         assert not (continuous_squashed and continuous_dist_type != 'gaussian'), 'squashed continuous distribution is only supported for gaussian distributions'
 
         self.continuous_squashed = continuous_squashed
+
+        assert regression_loss_type in ('mse', 'l1'), f'regression loss type {regression_loss_type} must be one of mse or l1'
+        self.regression_loss_type = regression_loss_type
 
         # discrete related computed values
 
@@ -849,6 +853,7 @@ class Embed(Base):
         auto_append_discrete_set_dim = None,
         **kwargs,
     ):
+        kwargs.pop('continuous_log_var_embed', None)
         super().__init__(*args, **kwargs, continuous_log_var_embed = False)
 
         self.auto_append_discrete_set_dim = default(auto_append_discrete_set_dim, self.num_discrete_sets == 1)
@@ -1297,6 +1302,8 @@ class Readout(Base):
         if selector.has_continuous:
             if selector.continuous_log_var_embed:
                 continuous_losses = -self.log_prob_continuous(continuous_dist_params, continuous_targets, selector = selector)
+            elif self.regression_loss_type == 'l1':
+                continuous_losses = F.l1_loss(continuous_dist_params, continuous_targets, reduction = 'none')
             else:
                 continuous_losses = F.mse_loss(continuous_dist_params, continuous_targets, reduction = 'none')
 
