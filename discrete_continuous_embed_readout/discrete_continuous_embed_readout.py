@@ -1372,7 +1372,7 @@ class Readout(Base):
         self,
         embed,
         targets = None,
-        return_loss = False,
+        return_loss = None,
         return_unreduced_loss = False,
         loss_mask = None,
         return_only_discrete_or_continuous = None,
@@ -1380,6 +1380,8 @@ class Readout(Base):
         selector_config = None
     ):
         return_only_discrete_or_continuous = default(return_only_discrete_or_continuous, self.return_only_discrete_or_continuous)
+
+        return_loss = default(return_loss, exists(targets))
 
         assert xnor(exists(targets), return_loss), '`target` must be passed in if `return_loss` set to True and vice versa'
 
