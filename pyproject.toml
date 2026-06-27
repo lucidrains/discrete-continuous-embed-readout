@@ -1,6 +1,6 @@
 [project]
 name = "discrete-continuous-embed-readout"
-version = "0.2.7"
+version = "0.2.8"
 description = "Discrete Continuous Embed Readout"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -25,7 +25,7 @@ classifiers=[
 dependencies = [
     "beartype",
     "einops>=0.8.1",
-    "torch>=2.8",
+    "torch>=2.5",
 ]
 
 [project.urls]

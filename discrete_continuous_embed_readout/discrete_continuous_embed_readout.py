@@ -30,6 +30,7 @@ from einops import rearrange, reduce, repeat, einsum
 
 DiscreteContinuous = namedtuple('DiscreteContinuous', ('discrete', 'continuous'))
 
+
 DiscreteConfig = list[list[int]]
 ContinuousConfig = list[int]
 SelectorConfig = tuple[DiscreteConfig, ContinuousConfig] | DiscreteConfig | ContinuousConfig
@@ -1241,6 +1242,12 @@ class Readout(Base):
         mask = None,
         return_unreduced_loss = False
     ):
+        def destruct_discrete_continuous(t):
+            if isinstance(t, DiscreteContinuous):
+                return t
+            assert isinstance(t, (tuple, list)) and len(t) == 2, 'must be tuple of (discrete, continuous)'
+            return t
+
         selector = self.get_selector(selector_index, selector_config=selector_config)
 
         # handle destructuring of logits
@@ -1248,20 +1255,16 @@ class Readout(Base):
         discrete_logits = logits
         continuous_dist_params = logits
 
-        if isinstance(logits, (tuple, list, DiscreteContinuous)) and len(logits) == 2:
-            discrete_logits, continuous_dist_params = logits
-        elif selector.has_discrete and selector.has_continuous:
-            raise ValueError(f'logits must be tuple of (discrete, continuous) when both are present, received {type(logits)}')
+        if isinstance(logits, DiscreteContinuous) or (selector.has_discrete and selector.has_continuous):
+            discrete_logits, continuous_dist_params = destruct_discrete_continuous(logits)
 
         # handle destructuring of targets
 
         discrete_targets = targets
         continuous_targets = targets
 
-        if isinstance(targets, (tuple, list, DiscreteContinuous)) and len(targets) == 2:
-            discrete_targets, continuous_targets = targets
-        elif selector.has_discrete and selector.has_continuous:
-            raise ValueError(f'targets must be tuple of (discrete, continuous) when both are present, received {type(targets)}')
+        if isinstance(targets, DiscreteContinuous) or (selector.has_discrete and selector.has_continuous):
+            discrete_targets, continuous_targets = destruct_discrete_continuous(targets)
 
         # take care of only one discrete logit group, as in language modeling
 
