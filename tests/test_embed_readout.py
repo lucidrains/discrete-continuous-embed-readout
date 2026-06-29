@@ -926,15 +926,3 @@ def test_multicategorical_kl_keep_num_actions_dim():
 
     kl_keep = dist1.kl_div(dist2, keep_num_actions_dim = True)
     assert kl_keep.shape == (2, 3, 1)
-
-def test_beta_soft_validate_range():
-    readout = Readout(0, num_continuous = 2, continuous_dist_type = 'beta')
-    logits = torch.randn(2, 2, 2)
-    sampled = torch.tensor([[0., 1.], [0.5, 0.5]])
-
-    log_prob_no_validate = readout.log_prob(logits, sampled, soft_validate_range=False)
-    log_prob_validated = readout.log_prob(logits, sampled, soft_validate_range=True)
-
-    assert not torch.isnan(log_prob_validated).any()
-    assert not torch.isinf(log_prob_validated).any()
-    assert torch.allclose(log_prob_no_validate[1], log_prob_validated[1], atol=1e-5)

@@ -1110,8 +1110,7 @@ class Readout(Base):
         self,
         continuous_dist_params,
         sampled,
-        selector = None,
-        soft_validate_range = False
+        selector = None
     ):
         assert exists(selector)
         assert selector.continuous_log_var_embed
@@ -1121,12 +1120,6 @@ class Readout(Base):
         if exists(continuous_mean_std):
             mean, std = continuous_mean_std.data.unbind(dim = -1)
             sampled = (sampled - mean) / std.clamp_min(self.eps)
-
-        if soft_validate_range:
-            default_range = self.continuous_dist.default_range
-            if exists(default_range):
-                min_val, max_val = default_range
-                sampled = sampled.clamp(min_val + self.eps, max_val - self.eps)
 
         gaussian_sampled = atanh(sampled, eps = self.eps) if selector.continuous_squashed else sampled
 
@@ -1166,8 +1159,7 @@ class Readout(Base):
         sampled,
         selector_index: int | None = None,
         selector_config: SelectorConfig | None = None,
-        concat = False,
-        soft_validate_range = False
+        concat = False
     ):
         selector = self.get_selector(selector_index, selector_config = selector_config)
 
@@ -1178,12 +1170,12 @@ class Readout(Base):
                 output = self.log_prob_discrete(logits, sampled)
 
             elif selector.has_continuous:
-                output = self.log_prob_continuous(logits, sampled, selector = selector, soft_validate_range = soft_validate_range)
+                output = self.log_prob_continuous(logits, sampled, selector = selector)
 
         else:
             discrete, continuous = logits
             discrete_sampled, continuous_sampled = sampled
-            output = DiscreteContinuous(self.log_prob_discrete(discrete, discrete_sampled), self.log_prob_continuous(continuous, continuous_sampled, selector = selector, soft_validate_range = soft_validate_range))
+            output = DiscreteContinuous(self.log_prob_discrete(discrete, discrete_sampled), self.log_prob_continuous(continuous, continuous_sampled, selector = selector))
 
         return self.maybe_concat(output, concat = concat)
 
