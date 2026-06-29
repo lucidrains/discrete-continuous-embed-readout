@@ -913,3 +913,16 @@ def test_continuous_native_range():
 
     rescaled_from_sq = readout_squashed.rescale_from_native(t_squashed, (0., 10.))
     assert torch.allclose(rescaled_from_sq, torch.tensor([5., 5.]))
+
+def test_multicategorical_kl_keep_num_actions_dim():
+    logits1 = torch.randn(2, 3, 4)
+    logits2 = torch.randn(2, 3, 4)
+
+    dist1 = MultiCategorical(logits1)
+    dist2 = MultiCategorical(logits2)
+
+    kl = dist1.kl_div(dist2)
+    assert kl.shape == (2, 3)
+
+    kl_keep = dist1.kl_div(dist2, keep_num_actions_dim = True)
+    assert kl_keep.shape == (2, 3, 1)

@@ -403,7 +403,7 @@ class MultiCategorical:
         entropies = rearrange(entropies, 'nd ... -> ... nd')
         return entropies
 
-    def kl_div(self, other):
+    def kl_div(self, other, keep_num_actions_dim = False):
         logits_true = self.logits
         logits_pred = other.logits
 
@@ -439,7 +439,7 @@ class MultiCategorical:
 
             kl_divs = stack(kl_divs, dim = -1)
 
-        if not self._is_list_tuple:
+        if not self._is_list_tuple and not keep_num_actions_dim:
             kl_divs = rearrange(kl_divs, '... 1 -> ...')
 
         return kl_divs
