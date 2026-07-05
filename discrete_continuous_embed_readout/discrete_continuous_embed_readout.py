@@ -174,6 +174,9 @@ class ContinuousDistribution(Module):
     def forward(self, params, differentiable = False):
         raise NotImplementedError
 
+    def clip_sampled(self, sampled):
+        return sampled
+
 class Gaussian(ContinuousDistribution):
     def __init__(self, log_var_clamp_range: tuple[float, float] | None = None, eps = 1e-6):
         super().__init__(eps = eps)
@@ -200,17 +203,25 @@ class Gaussian(ContinuousDistribution):
         return Normal(mu, std)
 
 class BetaDist(ContinuousDistribution):
-    def __init__(self, unimodal = False, eps = 1e-6):
+    def __init__(self, unimodal = False, eps = 1e-6, clip = True, clip_eps = 1e-5):
         super().__init__(eps = eps)
         self.unimodal = unimodal
+        self.clip = clip
+        self.clip_eps = clip_eps
 
     @property
     def default_range(self):
         return (0., 1.)
 
+    def clip_sampled(self, sampled):
+        if not self.clip:
+            return sampled
+        return sampled.clamp(min = self.clip_eps, max = 1. - self.clip_eps)
+
     def forward(self, params, differentiable = False):
         dist = self.dist(params)
-        return dist.rsample() if differentiable else dist.sample()
+        sampled = dist.rsample() if differentiable else dist.sample()
+        return self.clip_sampled(sampled)
 
     def dist(self, params):
         assert params.shape[-1] == 2
@@ -223,17 +234,25 @@ class BetaDist(ContinuousDistribution):
         return Beta(a, b)
 
 class KumaraswamyDist(ContinuousDistribution):
-    def __init__(self, unimodal = False, eps = 1e-6):
+    def __init__(self, unimodal = False, eps = 1e-6, clip = True, clip_eps = 1e-5):
         super().__init__(eps = eps)
         self.unimodal = unimodal
+        self.clip = clip
+        self.clip_eps = clip_eps
 
     @property
     def default_range(self):
         return (0., 1.)
 
+    def clip_sampled(self, sampled):
+        if not self.clip:
+            return sampled
+        return sampled.clamp(min = self.clip_eps, max = 1. - self.clip_eps)
+
     def forward(self, params, differentiable = False):
         dist = self.dist(params)
-        return dist.rsample() if differentiable else dist.sample()
+        sampled = dist.rsample() if differentiable else dist.sample()
+        return self.clip_sampled(sampled)
 
     def dist(self, params):
         assert params.shape[-1] == 2
@@ -245,12 +264,11 @@ class KumaraswamyDist(ContinuousDistribution):
 
         return Kumaraswamy(a, b)
 
-
-CONTINUOUS_DISTRIBUTIONS = {
-    'gaussian': Gaussian,
-    'beta': BetaDist,
-    'kumaraswamy': KumaraswamyDist
-}
+CONTINUOUS_DISTRIBUTIONS = dict(
+    gaussian = Gaussian,
+    beta = BetaDist,
+    kumaraswamy = KumaraswamyDist
+)
 
 # multi categorical
 
@@ -1122,6 +1140,7 @@ class Readout(Base):
             sampled = (sampled - mean) / std.clamp_min(self.eps)
 
         gaussian_sampled = atanh(sampled, eps = self.eps) if selector.continuous_squashed else sampled
+        gaussian_sampled = self.continuous_dist.clip_sampled(gaussian_sampled)
 
         dist = self.continuous_dist.dist(continuous_dist_params)
         log_prob = dist.log_prob(gaussian_sampled)
